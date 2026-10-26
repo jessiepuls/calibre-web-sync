@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.sync.lock
+config.local.json
+*.local.json
+.env
+.env.*
+!.env.example
+.cache/
+*.db
+*.db-*
+*.epub
+*.log
+.DS_Store
