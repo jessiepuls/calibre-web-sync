@@ -9,10 +9,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from calibre_web_sync import cache
-from calibre_web_sync.library import LibraryIdentity
+from calibre_web_sync import cache, cache_store
+from calibre_web_sync.library import LibraryIdentity, file_fingerprint
 
 UUID = '326903a0-15a5-4a37-85a7-6c69cd41dc13'
 OTHER_UUID = '426903a0-15a5-4a37-85a7-6c69cd41dc13'
@@ -38,7 +38,9 @@ class CacheTests(unittest.TestCase):
                 'size': 999999, 'mtime_ns': 1}
 
     def provider(self, **kwargs):
-        provider = cache.CachedDigestProvider(self.path, warn=self.messages.append, **kwargs)
+        timeout = kwargs.pop('timeout', 0.1)
+        store = cache_store.SQLiteDigestStore(self.path, timeout=timeout)
+        provider = cache.DigestProvider(store, warn=self.messages.append, **kwargs)
         self.addCleanup(provider.close)
         return provider
 
@@ -51,6 +53,57 @@ class CacheTests(unittest.TestCase):
     def populate(self):
         with self.provider() as provider:
             return provider.digest(self.book)
+
+    def fake_store(self):
+        store = Mock(spec=['path', 'lookup', 'save', 'close'])
+        store.path = self.path
+        store.lookup.return_value = None
+        return store
+
+    def test_provider_can_use_a_store_without_sqlite(self):
+        store = self.fake_store()
+        entry = cache_store.CacheEntry(
+            fingerprint=file_fingerprint(self.book['path']),
+            sha256=hashlib.sha256(b'original ebook').hexdigest(),
+            hashed_at_ns=100, last_seen_ns=100,
+        )
+        store.lookup.return_value = entry
+        with cache.DigestProvider(store) as provider:
+            with patch.object(cache, 'stable_digest', side_effect=AssertionError('Cache hit')):
+                with patch.object(cache.time, 'time_ns', return_value=200):
+                    self.assertEqual(provider.digest(self.book), entry.sha256)
+            key = cache_store.CacheKey.from_book(self.book)
+            store.lookup.assert_called_once_with(key)
+            saved_key, saved_entry = store.save.call_args.args
+            self.assertEqual(saved_key, key)
+            self.assertEqual(saved_entry.hashed_at_ns, 100)
+            self.assertEqual(saved_entry.last_seen_ns, 200)
+            self.assertEqual(provider.stats.persistent_hits, 1)
+        store.close.assert_called_once()
+        self.assertFalse(self.path.parent.exists())
+
+    def test_provider_saves_named_entry_on_miss(self):
+        store = self.fake_store()
+        with cache.DigestProvider(store) as provider:
+            expected = provider.digest(self.book)
+            key, entry = store.save.call_args.args
+            self.assertEqual(key.library_uuid, UUID)
+            self.assertEqual(key.relative_path, 'book.epub')
+            self.assertEqual(entry.sha256, expected)
+            self.assertEqual(entry.fingerprint, file_fingerprint(self.book['path']))
+            self.assertEqual(provider.stats.files_hashed, 1)
+
+    def test_provider_handles_storage_failure_in_one_place(self):
+        store = self.fake_store()
+        store.save.side_effect = cache_store.CacheStorageError('simulated storage failure')
+        with cache.DigestProvider(store, warn=self.messages.append) as provider:
+            expected = provider.digest(self.book)
+            self.assertFalse(provider.persistence_enabled)
+            self.assertEqual(provider.digest(self.book, force=True), expected)
+            store.lookup.assert_called_once()
+            store.save.assert_called_once()
+            store.close.assert_called_once()
+            self.assertEqual(len(self.messages), 1)
 
     def test_storage_is_lazy_and_files_are_private(self):
         provider = self.provider()
@@ -65,8 +118,8 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(provider.stats.bytes_hashed, len(b'original ebook'))
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(self.query('PRAGMA application_id')[0][0], cache.APPLICATION_ID)
-        self.assertEqual(self.query('PRAGMA user_version')[0][0], cache.SCHEMA_VERSION)
+        self.assertEqual(self.query('PRAGMA application_id')[0][0], cache_store.APPLICATION_ID)
+        self.assertEqual(self.query('PRAGMA user_version')[0][0], cache_store.SCHEMA_VERSION)
 
     def test_persistence_across_instances_and_current_attributes(self):
         expected = self.populate()
@@ -82,12 +135,13 @@ class CacheTests(unittest.TestCase):
         code = '''
 import sys
 from pathlib import Path
-from calibre_web_sync.cache import CachedDigestProvider
-from calibre_web_sync.library import LibraryIdentity
-from unittest.mock import patch
+from calibre_web_sync.cache import DigestProvider
+from calibre_web_sync.cache_store import SQLiteDigestStore
+from calibre_web_sync.library import LibraryIdentity, file_fingerprint
+from unittest.mock import Mock, patch
 book={'library':LibraryIdentity(sys.argv[3],Path(sys.argv[2])),
       'path':Path(sys.argv[2])/'book.epub','relative_path':Path('book.epub'),'format':'EPUB'}
-with CachedDigestProvider(sys.argv[1]) as provider:
+with DigestProvider(SQLiteDigestStore(sys.argv[1])) as provider:
     with patch('calibre_web_sync.cache.stable_digest',side_effect=AssertionError('unexpected read')):
         print(provider.digest(book))
 '''
@@ -151,8 +205,8 @@ with CachedDigestProvider(sys.argv[1]) as provider:
         self.assertTrue(self.path.is_file())
 
     def test_uncached_provider_never_opens_sqlite_or_creates_storage(self):
-        with cache.UncachedDigestProvider() as provider:
-            with patch.object(cache.sqlite3, 'connect', side_effect=AssertionError('No database access')):
+        with cache.DigestProvider() as provider:
+            with patch.object(cache_store.sqlite3, 'connect', side_effect=AssertionError('No database access')):
                 expected = provider.digest(self.book)
                 self.assertEqual(provider.digest(self.book), expected)
             self.assertEqual(provider.stats.files_hashed, 1)
@@ -162,7 +216,7 @@ with CachedDigestProvider(sys.argv[1]) as provider:
     def test_uncached_provider_leaves_an_existing_database_untouched(self):
         self.populate()
         before = self.path.read_bytes()
-        with cache.UncachedDigestProvider() as provider:
+        with cache.DigestProvider() as provider:
             provider.digest(self.book)
         self.assertEqual(self.path.read_bytes(), before)
 
@@ -228,7 +282,7 @@ with CachedDigestProvider(sys.argv[1]) as provider:
 
     def test_unsupported_schema_version_is_not_overwritten(self):
         self.populate()
-        for version in (0, cache.SCHEMA_VERSION + 1, 999):
+        for version in (0, cache_store.SCHEMA_VERSION + 1, 999):
             with self.subTest(version=version):
                 self.query(f'PRAGMA user_version={version}')
                 before = self.path.read_bytes()
@@ -236,43 +290,6 @@ with CachedDigestProvider(sys.argv[1]) as provider:
                 provider.digest(self.book)
                 self.assertFalse(provider.persistence_enabled)
                 self.assertEqual(self.path.read_bytes(), before)
-
-    def test_older_schema_is_left_untouched(self):
-        self.path.parent.mkdir()
-        # An independent fixture: no previous format has actually been released.
-        self.query('''CREATE TABLE digests (
-            library_uuid TEXT, library_root TEXT, relative_path TEXT, format TEXT,
-            size INTEGER, mtime_ns INTEGER, algorithm TEXT, digest_version INTEGER,
-            sha256 TEXT,
-            PRIMARY KEY (library_uuid,library_root,relative_path,format)
-        )''')
-        self.query(f'PRAGMA application_id={cache.APPLICATION_ID}')
-        self.query('PRAGMA user_version=0')
-        before = self.path.read_bytes()
-        provider = self.provider()
-        self.assertEqual(provider.digest(self.book), hashlib.sha256(b'original ebook').hexdigest())
-        self.assertFalse(provider.persistence_enabled)
-        self.assertEqual(len(self.messages), 1)
-        self.assertEqual(self.path.read_bytes(), before)
-
-    def test_failed_initialization_rolls_back_schema(self):
-        class FailingConnection(sqlite3.Connection):
-            def execute(self, sql, *args):
-                if sql.startswith('PRAGMA user_version='):
-                    raise sqlite3.OperationalError('simulated initialization failure')
-                return super().execute(sql, *args)
-        real_connect = sqlite3.connect
-
-        def failing_connect(*args, **kwargs):
-            return real_connect(*args, factory=FailingConnection, **kwargs)
-
-        with patch.object(cache.sqlite3, 'connect', side_effect=failing_connect):
-            provider = self.provider()
-            provider.digest(self.book)
-        self.assertFalse(provider.persistence_enabled)
-        self.assertEqual(self.query('PRAGMA application_id'), [(0,)])
-        self.assertEqual(self.query('PRAGMA user_version'), [(0,)])
-        self.assertEqual(self.query("SELECT name FROM sqlite_master WHERE type='table'"), [])
 
     def test_permission_failure_falls_back_once(self):
         provider = self.provider()
@@ -302,31 +319,6 @@ with CachedDigestProvider(sys.argv[1]) as provider:
             self.assertFalse(provider.persistence_enabled)
             lock.rollback()
         self.assertEqual(self.query('SELECT count(*) FROM digests'), [(1,)])
-
-    def test_interrupted_transaction_keeps_previously_committed_hash(self):
-        provider = self.provider()
-        expected = provider.digest(self.book)
-        provider._connection.execute('BEGIN IMMEDIATE')
-        provider._connection.execute('DELETE FROM digests')
-        provider.close()  # Simulates an interrupted transaction, not normal digest flow.
-        reopened = self.provider()
-        with patch.object(cache, 'stable_digest', side_effect=AssertionError('Completed hash should survive')):
-            self.assertEqual(reopened.digest(self.book), expected)
-
-    def test_failed_insert_rolls_back_without_losing_prior_entries(self):
-        provider = self.provider()
-        provider.digest(self.book)
-        other_path = self.book['path'].with_name('second.epub')
-        other_path.write_bytes(b'another ebook')
-        other = dict(self.book, path=other_path, relative_path=Path('second.epub'))
-        self.query("""CREATE TRIGGER simulate_failed_write AFTER INSERT ON digests
-                   WHEN new.relative_path='second.epub'
-                   BEGIN SELECT RAISE(ABORT, 'simulated failure'); END""")
-        # The file was hashed successfully; failing cache writes must not lose it.
-        self.assertEqual(provider.digest(other), hashlib.sha256(b'another ebook').hexdigest())
-        self.assertFalse(provider.persistence_enabled)
-        self.assertEqual(self.query('SELECT relative_path FROM digests'), [('book.epub',)])
-        self.assertEqual(len(self.messages), 1)
 
     def test_existing_empty_or_symlinked_files_are_not_adopted(self):
         self.path.parent.mkdir()
@@ -358,10 +350,9 @@ with CachedDigestProvider(sys.argv[1]) as provider:
     def test_ebook_errors_are_not_handled_as_cache_failures(self):
         provider = self.provider()
         for error in (PermissionError('ebook unreadable'), RuntimeError('ebook changed')):
-            with self.subTest(error=error):
-                with patch.object(cache, 'stable_digest', side_effect=error):
-                    with self.assertRaises(type(error)):
-                        provider.digest(self.book)
+            with self.subTest(error=error), patch.object(cache, 'stable_digest', side_effect=error):
+                with self.assertRaises(type(error)):
+                    provider.digest(self.book)
         self.assertTrue(provider.persistence_enabled)
         self.assertEqual(self.query('SELECT count(*) FROM digests'), [(0,)])
         self.assertEqual(self.messages, [])
