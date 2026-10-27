@@ -55,7 +55,7 @@ class CacheTests(unittest.TestCase):
             return provider.digest(self.book)
 
     def fake_store(self):
-        store = Mock(spec=['path', 'lookup', 'save', 'close'])
+        store = Mock(spec=['path', 'lookup', 'save', 'touch', 'close'])
         store.path = self.path
         store.lookup.return_value = None
         return store
@@ -74,10 +74,8 @@ class CacheTests(unittest.TestCase):
                     self.assertEqual(provider.digest(self.book), entry.sha256)
             key = cache_store.CacheKey.from_book(self.book)
             store.lookup.assert_called_once_with(key)
-            saved_key, saved_entry = store.save.call_args.args
-            self.assertEqual(saved_key, key)
-            self.assertEqual(saved_entry.hashed_at_ns, 100)
-            self.assertEqual(saved_entry.last_seen_ns, 200)
+            store.touch.assert_called_once_with(key, entry, 200)
+            store.save.assert_not_called()
             self.assertEqual(provider.stats.persistent_hits, 1)
         store.close.assert_called_once()
         self.assertFalse(self.path.parent.exists())
@@ -256,6 +254,42 @@ with DigestProvider(SQLiteDigestStore(sys.argv[1])) as provider:
         with patch.object(cache.time, 'time_ns', return_value=200):
             self.provider().digest(self.book)
         self.assertEqual(self.query('SELECT hashed_at_ns,last_seen_ns FROM digests'), [(100, 200)])
+
+    def test_hit_does_not_overwrite_digest_rehashed_after_lookup(self):
+        expected = self.populate()
+        provider = self.provider()
+        key = cache_store.CacheKey.from_book(self.book)
+        other = self.provider(rehash=True)
+        lookup = provider.store.lookup
+        observed = []
+
+        def rehash_after_lookup(key):
+            entry = lookup(key)
+            with patch.object(cache.time, 'time_ns', return_value=entry.hashed_at_ns + 100):
+                self.assertEqual(other.digest(self.book), expected)
+            observed.append(other.store.lookup(key))
+            return entry
+
+        with patch.object(provider.store, 'lookup', side_effect=rehash_after_lookup):
+            with patch.object(cache, 'stable_digest', wraps=cache.stable_digest) as hashed:
+                self.assertEqual(provider.digest(self.book), expected)
+        self.assertEqual(hashed.call_count, 1)  # Only the other provider rehashes.
+        self.assertEqual(other.store.lookup(key), observed[0])
+        self.assertEqual(provider.stats.persistent_hits, 1)
+        self.assertEqual(provider.stats.files_hashed, 0)
+
+    def test_failed_touch_warns_once_and_falls_back_to_fresh_hashes(self):
+        self.populate()
+        provider = self.provider()
+        store = provider.store
+        with patch.object(store, 'touch', side_effect=cache_store.CacheStorageError('simulated failure')):
+            with patch.object(cache, 'stable_digest', wraps=cache.stable_digest) as hashed:
+                expected = provider.digest(self.book)
+                self.assertEqual(provider.digest(self.book, force=True), expected)
+        self.assertEqual(hashed.call_count, 2)
+        self.assertEqual(len(self.messages), 1)
+        self.assertFalse(provider.persistence_enabled)
+        self.assertEqual(provider.stats.persistent_hits, 0)
 
     def test_corrupt_file_is_not_overwritten_and_warning_occurs_once(self):
         self.path.parent.mkdir()

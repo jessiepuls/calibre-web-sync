@@ -1,6 +1,6 @@
 """Coordinate fingerprint checks, optional storage, hashing, and statistics."""
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import logging
 import os
 from pathlib import Path
@@ -143,7 +143,7 @@ class DigestProvider:
             if entry is None or not entry.matches(fingerprint):
                 return None
             self._ensure_unchanged(path, fingerprint)
-            self.store.save(key, replace(entry, last_seen_ns=time.time_ns()))
+            self.store.touch(key, entry, time.time_ns())
             self.stats.persistent_misses -= 1
             self.stats.persistent_hits += 1
             return entry.as_digest()

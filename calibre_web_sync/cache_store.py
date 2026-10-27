@@ -130,7 +130,8 @@ class SQLiteDigestStore:
     """Lazy SQLite lookup/save operations; errors never decide hashing policy.
 
     lookup returns an entry without updating it. save atomically writes exactly
-    the supplied entry. Neither method reads ebook contents or emits diagnostics.
+    the supplied entry. touch advances last-seen only for the observed digest.
+    These operations do not read ebook contents or emit diagnostics.
     Create, use, and close each store on a single thread.
 
     Use a private per-user cache tree. Directory/file ownership and permission bits
@@ -332,6 +333,25 @@ class SQLiteDigestStore:
                     'size=excluded.size,mtime_ns=excluded.mtime_ns,algorithm=excluded.algorithm,'
                     'digest_version=excluded.digest_version,sha256=excluded.sha256,'
                     'hashed_at_ns=excluded.hashed_at_ns,last_seen_ns=excluded.last_seen_ns', values)
+
+    def touch(self, key, entry, last_seen_ns):
+        """Advance observation time only if the stored digest is still the same.
+
+        Replacements and deletions since lookup are harmless no-ops. Concurrent
+        observations of the same digest retain the greatest last-seen timestamp.
+        """
+        if key.library_uuid is None:
+            raise ValueError('Persistent entries require a library UUID')
+        values = dict(asdict(key), size=entry.fingerprint.size,
+                      mtime_ns=entry.fingerprint.mtime_ns, algorithm=entry.algorithm,
+                      digest_version=entry.digest_version, sha256=entry.sha256,
+                      hashed_at_ns=entry.hashed_at_ns, last_seen_ns=last_seen_ns)
+        with self._database() as connection, connection:
+            connection.execute(
+                'UPDATE digests SET last_seen_ns=MAX(last_seen_ns,:last_seen_ns) '
+                'WHERE ' + WHERE_KEY + ' AND size=:size AND mtime_ns=:mtime_ns '
+                'AND algorithm=:algorithm AND digest_version=:digest_version '
+                'AND sha256=:sha256 AND hashed_at_ns=:hashed_at_ns', values)
 
     def prune_epubs(self, library, keys):
         """Atomically prune one library's EPUBs using its complete observed set.

@@ -53,6 +53,11 @@ with caching enabled by default. Storage failures warn once and disable persiste
 for the run; library/file errors propagate. Missing UUIDs bypass persistence only
 for the affected library. Existing unknown or damaged databases are preserved.
 
+Persistent hits update only the last-seen timestamp, conditional on the stored
+digest still matching the observed entry. A delayed hit cannot overwrite a
+replacement digest or recreate a pruned entry, and observation times never move
+backward when hits interleave across comparisons.
+
 The CLI reports comparison statistics immediately after planning. Elapsed time
 includes catalog snapshots, file checks, hashing, cache access, and pruning.
 Hash counters describe completed fresh content reads by the comparison provider;

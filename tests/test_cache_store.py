@@ -54,11 +54,73 @@ class StoreTests(unittest.TestCase):
         store.lookup(self.key)
         self.assertEqual(self.query('SELECT hashed_at_ns,last_seen_ns FROM digests'), before)
 
+    def test_touch_only_advances_observation_time(self):
+        store = self.store()
+        store.save(self.key, self.entry)
+        store.touch(self.key, self.entry, 400)
+        self.assertEqual(store.lookup(self.key), replace(self.entry, last_seen_ns=400))
+        # A delayed observer must not move time backward, even with an old entry.
+        self.store().touch(self.key, self.entry, 300)
+        self.assertEqual(store.lookup(self.key), replace(self.entry, last_seen_ns=400))
+
+    def test_stale_touch_preserves_replacements_from_another_connection(self):
+        reader, writer = self.store(), self.store()
+        replacements = [
+            replace(self.entry, sha256='f' * 64),
+            replace(self.entry, fingerprint=FileFingerprint(15, 1000000000)),
+            replace(self.entry, fingerprint=FileFingerprint(14, 2000000000)),
+            replace(self.entry, algorithm='sha512'),
+            replace(self.entry, digest_version=2),
+            replace(self.entry, hashed_at_ns=500),
+        ]
+        for replacement in replacements:
+            with self.subTest(replacement=replacement):
+                reader.save(self.key, self.entry)
+                observed = reader.lookup(self.key)
+                writer.save(self.key, replacement)
+                reader.touch(self.key, observed, 600)
+                self.assertEqual(writer.lookup(self.key), replacement)
+
+    def test_touch_does_not_recreate_a_deleted_entry(self):
+        reader, writer = self.store(), self.store()
+        reader.save(self.key, self.entry)
+        observed = reader.lookup(self.key)
+        library = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
+        writer.prune_epubs(library, set())
+        reader.touch(self.key, observed, 600)
+        self.assertIsNone(writer.lookup(self.key))
+
+    def test_touch_is_scoped_to_the_full_key(self):
+        store = self.store()
+        others = [replace(self.key, library_uuid='other-uuid'),
+                  replace(self.key, library_root=str(self.root / 'other-library')),
+                  replace(self.key, relative_path='other.epub'),
+                  replace(self.key, format='MOBI')]
+        for key in [self.key] + others:
+            store.save(key, self.entry)
+        store.touch(self.key, self.entry, 600)
+        self.assertEqual(store.lookup(self.key), replace(self.entry, last_seen_ns=600))
+        for key in others:
+            self.assertEqual(store.lookup(key), self.entry)
+
+    def test_failed_touch_rolls_back_and_store_can_retry(self):
+        store = self.store()
+        store.save(self.key, self.entry)
+        self.query("""CREATE TRIGGER simulate_failed_touch AFTER UPDATE ON digests
+                   BEGIN SELECT RAISE(ABORT, 'simulated failure'); END""")
+        with self.assertRaises(CacheStorageError):
+            store.touch(self.key, self.entry, 600)
+        self.assertEqual(store.lookup(self.key), self.entry)
+        self.query('DROP TRIGGER simulate_failed_touch')
+        store.touch(self.key, self.entry, 600)
+        self.assertEqual(store.lookup(self.key), replace(self.entry, last_seen_ns=600))
+
     def test_parameterized_keys_allow_sql_punctuation(self):
         key = replace(self.key, relative_path="Robert'); DROP TABLE digests;--.epub")
         store = self.store()
         store.save(key, self.entry)
-        self.assertEqual(store.lookup(key), self.entry)
+        store.touch(key, self.entry, 300)
+        self.assertEqual(store.lookup(key), replace(self.entry, last_seen_ns=300))
         self.assertEqual(self.query('SELECT count(*) FROM digests'), [(1,)])
 
     def test_old_schema_is_rejected_without_modifying_it(self):
