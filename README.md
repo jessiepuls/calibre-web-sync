@@ -116,4 +116,3 @@ Implementation references:
 [Calibre-Web upload handler](https://github.com/janeczku/calibre-web/blob/master/cps/editbooks.py),
 [login handler](https://github.com/janeczku/calibre-web/blob/master/cps/web.py),
 [1Password CLI](https://developer.1password.com/docs/cli/reference/management-commands/item/).
-# calibre-web-sync
