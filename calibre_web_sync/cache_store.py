@@ -1,10 +1,12 @@
 """SQLite persistence for named digest entries, independent of file hashing."""
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+import errno
 import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 from typing import Optional
 
@@ -94,12 +96,45 @@ class CacheSchema:
 class CacheStorageError(RuntimeError):
     """Storage failed; the caller decides whether to continue without persistence."""
 
+    def __init__(self, message, advice='Check the cache location and retry.'):
+        super().__init__(message)
+        self.advice = advice
+
+    @classmethod
+    def from_exception(cls, error):
+        """Describe known failures without exposing arbitrary SQL or file contents."""
+        # Standard SQLite base codes; numeric values also work on Python 3.9,
+        # which does not expose all the newer sqlite3 error-code attributes.
+        code = getattr(error, 'sqlite_errorcode', 0) & 0xff
+        message = str(error).lower()
+        # SQLITE_BUSY / SQLITE_LOCKED
+        if code in (5, 6) or message in ('database is locked', 'database table is locked'):
+            return cls('Hash cache is locked', 'Retry after the other cache operation finishes.')
+        # SQLITE_PERM / SQLITE_READONLY / SQLITE_AUTH
+        if isinstance(error, PermissionError) or code in (3, 8, 23):
+            return cls('Hash cache permission denied', 'Check cache file and directory permissions.')
+        # SQLITE_CORRUPT / SQLITE_NOTADB
+        if code in (11, 26) or message in ('file is not a database', 'database disk image is malformed'):
+            return cls('Hash cache is corrupt or invalid',
+                       'Remove the disposable cache file to rebuild it on a later run.')
+        # SQLITE_FULL
+        if code == 13 or getattr(error, 'errno', None) == errno.ENOSPC:
+            return cls('Hash cache storage is full', 'Free space on the cache filesystem and retry.')
+        if isinstance(error, OSError):
+            return cls('Hash cache filesystem access failed')
+        return cls('Hash cache database operation failed')
+
+
+class ThreadConfinementError(RuntimeError):
+    """A provider/store was used outside the thread that owns its state."""
+
 
 class SQLiteDigestStore:
     """Lazy SQLite lookup/save operations; errors never decide hashing policy.
 
     lookup returns an entry without updating it. save atomically writes exactly
     the supplied entry. Neither method reads ebook contents or emits diagnostics.
+    Create, use, and close each store on a single thread.
     """
 
     def __init__(self, path, *, timeout=0.1):
@@ -107,32 +142,40 @@ class SQLiteDigestStore:
         self.timeout = timeout
         self._connection = None
         self._closed = False
+        self._owner = threading.current_thread()
+
+    def _check_thread(self):
+        if threading.current_thread() is not self._owner:
+            raise ThreadConfinementError('Use and close the cache store on its creating thread.')
 
     def __enter__(self):
+        self._check_thread()
         return self
 
     def __exit__(self, *args):
         self.close()
 
     def close(self):
+        self._check_thread()
         try:
             if self._connection is not None:
                 self._connection.close()
         except sqlite3.Error as error:
-            raise CacheStorageError('Cannot close hash cache') from error
+            raise CacheStorageError.from_exception(error) from error
         else:
             self._connection = None
             self._closed = True
 
     @contextmanager
     def _database(self):
+        self._check_thread()
         if self._closed:
             raise CacheStorageError('Hash cache store is closed')
         try:
             self._open()
             yield self._connection
         except (OSError, sqlite3.Error) as error:
-            raise CacheStorageError('Hash cache storage failed') from error
+            raise CacheStorageError.from_exception(error) from error
 
     @staticmethod
     def _schema(connection):
@@ -149,14 +192,16 @@ class SQLiteDigestStore:
         if schema.is_current:
             return
         if not (created and schema.is_empty):
-            raise sqlite3.DatabaseError('Unrecognized cache schema')
+            raise CacheStorageError('Unrecognized cache schema',
+                                    'Choose a different cache location; this file was left unchanged.')
         with connection:
             connection.execute('BEGIN IMMEDIATE')
             schema = self._schema(connection)
             if schema.is_current:
                 return
             if not (created and schema.is_empty):
-                raise sqlite3.DatabaseError('Cache schema changed during initialization')
+                raise CacheStorageError('Cache schema changed during initialization',
+                                        'Retry after the other initialization finishes.')
             connection.execute(CREATE_DIGESTS)
             connection.execute(f'PRAGMA application_id={APPLICATION_ID}')
             connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
@@ -166,7 +211,7 @@ class SQLiteDigestStore:
             return
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.path.is_symlink():
-            raise OSError('Cache path is a symlink')
+            raise CacheStorageError('Cache path is a symlink', 'Choose a non-symlink cache file.')
         created = False
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -179,9 +224,10 @@ class SQLiteDigestStore:
         connection.row_factory = sqlite3.Row
         try:
             if connection.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-                raise sqlite3.DatabaseError('Cache integrity check failed')
+                raise CacheStorageError('Cache integrity check failed',
+                                        'Remove the disposable cache file to rebuild it on a later run.')
             self._prepare(connection, created)
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, CacheStorageError):
             connection.close()
             raise
         self._connection = connection
@@ -194,7 +240,8 @@ class SQLiteDigestStore:
             if row is None:
                 return None
             if not isinstance(row['sha256'], str) or re.fullmatch(r'[0-9a-f]{64}', row['sha256']) is None:
-                raise CacheStorageError('Invalid cached digest')
+                raise CacheStorageError('Invalid cached digest',
+                                        'Remove the disposable cache file to rebuild it on a later run.')
             return CacheEntry(
                 fingerprint=FileFingerprint(row['size'], row['mtime_ns']),
                 sha256=row['sha256'], hashed_at_ns=row['hashed_at_ns'],

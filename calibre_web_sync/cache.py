@@ -1,11 +1,12 @@
 """Coordinate fingerprint checks, optional storage, hashing, and statistics."""
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+import logging
 from pathlib import Path
+import threading
 import time
-import warnings
 
-from .cache_store import CacheEntry, CacheKey, CacheStorageError
+from .cache_store import CacheEntry, CacheKey, CacheStorageError, ThreadConfinementError
 from .library import file_fingerprint, stable_digest
 
 
@@ -18,8 +19,7 @@ class CacheStats:
     bytes_hashed: int = 0
 
 
-def _warn(message):
-    warnings.warn(message, RuntimeWarning, stacklevel=3)
+LOGGER = logging.getLogger(__name__)
 
 
 class DigestProvider:
@@ -28,28 +28,36 @@ class DigestProvider:
     rehash ignores stored entries but permits per-run reuse. force=True bypasses
     both storage and per-run hits. Ebook errors always propagate. The provider
     owns the supplied store and closes it on exit or after a storage failure.
+    Create, use, and close the provider and its store on the same thread.
     """
 
     def __init__(self, store=None, *, rehash=False, warn=None):
         self.store = store
         self.rehash = rehash
-        self.warn = warn if warn is not None else _warn
+        self.warn = warn if warn is not None else LOGGER.warning
         self.stats = CacheStats()
         self._memory = {}
         self._missing_identity = set()
         self._closed = False
+        self._owner = threading.current_thread()
+
+    def _check_thread(self):
+        if threading.current_thread() is not self._owner:
+            raise ThreadConfinementError('Use and close the digest provider on its creating thread.')
 
     @property
     def persistence_enabled(self):
         return self.store is not None
 
     def __enter__(self):
+        self._check_thread()
         return self
 
     def __exit__(self, *args):
         self.close()
 
     def close(self):
+        self._check_thread()
         if self.store is not None:
             self.store.close()
             self.store = None
@@ -61,7 +69,7 @@ class DigestProvider:
         """The only transition from persistent storage to uncached operation."""
         try:
             yield
-        except CacheStorageError:
+        except CacheStorageError as error:
             store = self.store
             try:
                 store.close()
@@ -69,8 +77,7 @@ class DigestProvider:
                 pass
             self.store = None
             self._memory.clear()
-            self.warn(f'Hash cache unavailable at {store.path}; continuing without caching. '
-                      'The cache was not replaced. Remove an invalid cache file manually to rebuild it.')
+            self.warn(f'{error} at {store.path}; continuing without caching. {error.advice}')
 
     def _can_persist(self, key):
         if self.store is None:
@@ -84,6 +91,7 @@ class DigestProvider:
         return True
 
     def digest(self, book, force=False):
+        self._check_thread()
         if self._closed:
             raise RuntimeError('Digest provider is closed')
         key = CacheKey.from_book(book)
