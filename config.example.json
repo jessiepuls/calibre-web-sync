@@ -1,7 +1,7 @@
 {
   "local": "/path/to/local/Calibre Library",
   "remote": "/path/to/mounted/server/books",
-  "op_item": "Calibre-Web",
-  "op_vault": "Private",
+  "url": "https://books.example.com",
+  "username": "your-name",
   "cache": true
 }

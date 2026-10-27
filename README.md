@@ -18,8 +18,11 @@ From this repository:
 cp config.example.json config.local.json
 ```
 
-Edit `config.local.json` to set your library paths and 1Password item reference.
-This file is ignored by Git. It contains references, not a password.
+Edit `config.local.json` to set your library paths, Calibre-Web URL, and username.
+The example uses a private password prompt. To save a 1Password item reference
+instead, follow [Authentication](#authentication). Your chosen method is saved in
+the configuration, so ordinary runs need no authentication arguments. This file
+is ignored by Git; leave passwords out of it.
 
 CLI flags override configuration. Use `--config PATH` for another configuration.
 Without a configured local path, the current directory is used. A remote path is
@@ -130,26 +133,71 @@ comparisons. See [benchmarking](docs/benchmarking.md) for reproducible measureme
 
 ## Authentication
 
-For 1Password, install `op`, unlock the desktop app, and enable
+Choose a login method in `config.local.json`:
+
+- **Password prompt:** set `url` and `username`, and omit the `op_*` settings.
+- **1Password:** set `op_item` and optionally `op_vault` and `op_account`.
+  The item supplies the URL, username, and password.
+
+The presence of `op_item` selects 1Password. Otherwise, the script prompts for
+your password. Once configured, either method uses the same commands:
+
+```sh
+python3 sync.py --check-login          # Test the configured login method
+python3 sync.py --apply                # Upload using the configured login method
+```
+
+Preview runs (`python3 sync.py`) do not authenticate. Both methods use standard
+Calibre-Web username/password login; OAuth-only and SSO gateway logins are not
+implemented.
+
+### Password prompt
+
+Keep these authentication fields alongside your library paths in the configuration:
+
+```json
+{
+  "url": "https://books.example.com",
+  "username": "your-name"
+}
+```
+
+When switching from 1Password, remove `op_item`, `op_vault`, and `op_account`.
+The script prompts privately when checking login or uploading; it does not save
+the password in configuration.
+
+### 1Password
+
+Install `op`, unlock the desktop app, and enable
 **Settings → Developer → Integrate with 1Password CLI**. The item should contain a
 username, password, and website URL. With multiple URLs, designate a primary URL or
 pass `--url` explicitly. Saved URLs ending in `/login` are handled automatically.
 
-```sh
-python3 sync.py --check-login --op-item 'Calibre-Web' --op-vault 'Private'
+Replace the `url` and `username` authentication fields with:
+
+```json
+{
+  "op_item": "Calibre-Web",
+  "op_vault": "Private"
+}
 ```
 
-Add `--op-account ACCOUNT` for a particular 1Password account. Secret CLI output is
-captured in memory, never printed or written to files. Dry runs do not read secrets.
+Keep your library paths and other settings. Add `op_account` if needed to select
+a particular 1Password account. With this configuration, `python3 sync.py --apply`
+uses 1Password automatically; no `--op-item` argument is needed.
 
-Without 1Password, omit the `op_*` settings from your configuration and run:
+### Command-line overrides
+
+CLI arguments override their matching configuration fields for one run:
 
 ```sh
 python3 sync.py --check-login --url 'https://books.example.com' --username 'your-name'
+python3 sync.py --check-login --op-item 'Another login' --op-vault 'Private'
 ```
 
-The password is prompted privately. Standard Calibre-Web username/password login
-is supported; OAuth-only and SSO gateway logins are not implemented.
+Setting `url` or `username` in configuration or on the CLI overrides that value
+from the 1Password item; it does not switch off 1Password when `op_item` is set.
+1Password CLI output is captured in memory, never printed or written to files.
 
 In Calibre-Web, enable **Admin → Edit Basic Configuration → Feature Configuration →
 Enable Uploads**, and grant the account **Upload** permission under **Admin → Users**.
