@@ -156,20 +156,54 @@ def catalog(root):
                 authors[bid].append(name.replace('|', ','))
             books = []
             for bid, title, folder, name in c.execute("SELECT b.id,b.title,b.path,d.name FROM books b JOIN data d ON d.book=b.id WHERE upper(d.format)='EPUB' ORDER BY b.id"):
-                path = (root / folder / (name + '.epub')).resolve()
-                if not path.is_relative_to(root):
-                    raise RuntimeError(f'Book {bid}: path escapes library')
                 try:
-                    attributes = path.stat()
-                except FileNotFoundError:
-                    raise RuntimeError(f'Book {bid}: missing EPUB: {path}') from None
-                if not stat.S_ISREG(attributes.st_mode):
-                    raise RuntimeError(f'Book {bid}: missing EPUB: {path}')
-                books.append({'id': bid, 'title': title, 'authors': authors[bid], 'path': path,
-                              'library': identity,
-                              'relative_path': path.relative_to(root), 'format': 'EPUB',
-                              'size': attributes.st_size, 'mtime_ns': attributes.st_mtime_ns,
-                              'key': (normalize(title), tuple(sorted(normalize(a) for a in authors[bid])))})
+                    books.append(_epub_book(identity, (bid, title, folder, name), authors[bid]))
+                except FileNotFoundError as error:
+                    raise RuntimeError(f'Book {bid}: missing EPUB: {error.filename}') from None
             return LibraryCatalog(identity, tuple(books))
         finally:
             c.close()
+
+
+def _epub_book(identity, row, authors):
+    """Resolve one EPUB with the same containment and file checks for every caller."""
+    bid, title, folder, name = row
+    root = identity.root
+    path = (root / folder / (name + '.epub')).resolve()
+    if not path.is_relative_to(root):
+        raise RuntimeError(f'Book {bid}: path escapes library')
+    attributes = path.stat()
+    if not stat.S_ISREG(attributes.st_mode):
+        raise RuntimeError(f'Book {bid}: missing EPUB: {path}')
+    return {'id': bid, 'title': title, 'authors': authors, 'path': path,
+            'library': identity, 'relative_path': path.relative_to(root), 'format': 'EPUB',
+            'size': attributes.st_size, 'mtime_ns': attributes.st_mtime_ns,
+            'key': (normalize(title), tuple(sorted(normalize(a) for a in authors)))}
+
+
+def lookup_epub(root, book_id):
+    """Read one book from a fresh snapshot; absent rows/files are not yet visible.
+
+    This is not a complete catalog and cannot authorize cache pruning. Other
+    library, permission, and containment errors propagate.
+    """
+    root = Path(root).resolve()
+    with tempfile.TemporaryDirectory(prefix='calibre-sync-db-') as temporary:
+        copied = Path(temporary) / 'metadata.db'
+        snapshot(root, copied)
+        connection = sqlite3.connect(copied)
+        try:
+            row = connection.execute(
+                "SELECT b.id,b.title,b.path,d.name FROM books b JOIN data d ON d.book=b.id "
+                "WHERE b.id=? AND upper(d.format)='EPUB'", (book_id,)).fetchone()
+            if row is None:
+                return None
+            identity = library_identity(connection, root)
+            authors = [name.replace('|', ',') for (name,) in connection.execute(
+                'SELECT a.name FROM books_authors_link l JOIN authors a ON a.id=l.author '
+                'WHERE l.book=? ORDER BY l.id', (book_id,))]
+            return _epub_book(identity, row, authors)
+        except FileNotFoundError:
+            return None
+        finally:
+            connection.close()

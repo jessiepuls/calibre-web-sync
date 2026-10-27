@@ -31,12 +31,15 @@ Neither catalog discovery nor planning modifies either library.
 
 ## Digest caching
 
-The CLI supplies a cached digest provider to the planner, scoped to comparison.
+The CLI owns a digest provider for comparison and upload verification, and lends
+it to the planner and verification function.
 Storage is opened lazily and failures fall back to fresh hashing. `--no-cache`
 uses the same provider without a persistent store. Cache keys include library
 UUID, resolved root, relative path, and format; size and nanosecond modification
 time determine reuse. Complete fresh catalogs authorize pruning stale EPUB
-entries. Upload verification uses fresh hashes independently of this provider.
+entries. Upload verification reads fresh bytes independently of cache hits and
+seeds the provider only after the digest matches and the file fingerprint is
+still unchanged. Disabled caching also disables persistence of verified hashes.
 
 ## Uploads and verification
 
@@ -45,8 +48,10 @@ upload it stages a copy, freshly hashes it against the planned digest, and sends
 it through the authenticated client. Upload requests are not automatically retried
 because a failed response may follow a committed upload.
 
-After each upload, `engine.verify_upload` reads fresh server catalogs and checks
-the EPUB for the returned server book ID against the planned digest. It retries
+After each upload, `engine.verify_upload` uses `library.lookup_epub` to read the
+returned server book ID from a fresh database snapshot. Only that book's EPUB is
+resolved, checked, and hashed against the planned digest; unrelated book files
+are not accessed. This partial lookup cannot authorize cache pruning. It retries
 verification for delayed visibility and stops the run if verification fails.
 The next upload starts only after the previous one is verified. A checkout lock
 prevents overlapping runs from the same repository.

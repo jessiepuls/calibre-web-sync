@@ -125,7 +125,8 @@ Enable Uploads**, and grant the account **Upload** permission under **Admin → 
 - Does not propagate local deletions, replace files, or update existing server metadata.
 - Uploads the original EPUB bytes. Calibre-Web reads embedded metadata and covers;
   local database-only edits and separate cover files are not synchronized.
-- Verifies uploaded EPUBs against the server file using SHA-256.
+- Freshly verifies each uploaded EPUB using SHA-256 and a lookup of the returned
+  server book ID, then seeds its verified hash into the enabled cache.
 - Stops on failures without retrying a potentially committed upload. A fresh run
   checks server files again, allowing interrupted uploads to be resumed.
 - Uses database snapshots for comparison and stops if a WAL/journal is present.

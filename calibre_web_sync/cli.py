@@ -112,42 +112,47 @@ def main():
             directory = Path(args.cache_dir).expanduser() if args.cache_dir else default_cache_dir()
             store = SQLiteDigestStore(directory / 'hashes.sqlite3')
         with DigestProvider(store, rehash=args.rehash) as provider:
-            plan = make_plan(catalog(local), catalog(remote), digest_provider=provider,
-                             progress=lambda done, total: print(f'Comparing {done}/{total}...', flush=True))
-        counts = collections.Counter(b['status'] for b in plan)
-        print(' | '.join(f'{key}: {counts[key]}' for key in ('missing', 'present', 'review', 'duplicate-local')))
-        allowed = set(args.include_review)
-        valid = {b['id'] for b in plan if b['status'] == 'review'}
-        if allowed - valid:
-            parser.error(f'--include-review IDs must be current review entries: {sorted(allowed - valid)}')
-        for book in plan:
-            if book['status'] in ('missing', 'review'):
-                print(f"{book['status'].upper():7} {book['id']:5}  {book['title']} — {', '.join(book['authors'])}")
-        selected = [b for b in plan if b['status'] == 'missing' or (b['status'] == 'review' and b['id'] in allowed)]
-        if args.limit:
-            selected = selected[:args.limit]
-        if not args.apply:
-            print(f'Dry run only. {len(selected)} EPUBs selected; use --apply to upload.')
-            return
-        if not selected:
-            print('Nothing to upload.')
-            return
-        client = authenticated_client(args)
-        with tempfile.TemporaryDirectory(prefix='calibre-sync-upload-') as temporary:
-            for number, book in enumerate(selected, 1):
-                # Stage stable bytes and refuse changes made after planning.
-                path = Path(temporary) / 'book.epub'
-                shutil.copyfile(book['path'], path)
-                if digest(path) != book['sha256']:
-                    raise RuntimeError(f"Book {book['id']} changed since planning; rerun after closing Calibre.")
-                print(f"Uploading {number}/{len(selected)}: {book['title']}", flush=True)
-                # POST is never automatically retried: it might already have committed.
-                server_id = client.upload(path)
-                verify_upload(remote, server_id, book['sha256'])
-                print(f'  Verified server book {server_id}', flush=True)
-        print(f'Finished: uploaded and verified {len(selected)} EPUBs. Existing server entries were left unchanged.')
+            sync_libraries(parser, args, local, remote, provider)
     finally:
         lock.close()
+
+
+def sync_libraries(parser, args, local, remote, provider):
+    """Compare and upload while the caller owns the lock and digest provider."""
+    plan = make_plan(catalog(local), catalog(remote), digest_provider=provider,
+                     progress=lambda done, total: print(f'Comparing {done}/{total}...', flush=True))
+    counts = collections.Counter(b['status'] for b in plan)
+    print(' | '.join(f'{key}: {counts[key]}' for key in ('missing', 'present', 'review', 'duplicate-local')))
+    allowed = set(args.include_review)
+    valid = {b['id'] for b in plan if b['status'] == 'review'}
+    if allowed - valid:
+        parser.error(f'--include-review IDs must be current review entries: {sorted(allowed - valid)}')
+    for book in plan:
+        if book['status'] in ('missing', 'review'):
+            print(f"{book['status'].upper():7} {book['id']:5}  {book['title']} — {', '.join(book['authors'])}")
+    selected = [b for b in plan if b['status'] == 'missing' or (b['status'] == 'review' and b['id'] in allowed)]
+    if args.limit:
+        selected = selected[:args.limit]
+    if not args.apply:
+        print(f'Dry run only. {len(selected)} EPUBs selected; use --apply to upload.')
+        return
+    if not selected:
+        print('Nothing to upload.')
+        return
+    client = authenticated_client(args)
+    with tempfile.TemporaryDirectory(prefix='calibre-sync-upload-') as temporary:
+        for number, book in enumerate(selected, 1):
+            # Stage stable bytes and refuse changes made after planning.
+            path = Path(temporary) / 'book.epub'
+            shutil.copyfile(book['path'], path)
+            if digest(path) != book['sha256']:
+                raise RuntimeError(f"Book {book['id']} changed since planning; rerun after closing Calibre.")
+            print(f"Uploading {number}/{len(selected)}: {book['title']}", flush=True)
+            # POST is never automatically retried: it might already have committed.
+            server_id = client.upload(path)
+            verify_upload(remote, server_id, book['sha256'], digest_provider=provider)
+            print(f'  Verified server book {server_id}', flush=True)
+    print(f'Finished: uploaded and verified {len(selected)} EPUBs. Existing server entries were left unchanged.')
 
 
 def run():

@@ -157,8 +157,9 @@ class LibraryTests(unittest.TestCase):
 
     def test_missing_file_and_disconnected_library_are_errors(self):
         self.path.unlink()
-        with self.assertRaisesRegex(RuntimeError, 'missing EPUB'):
+        with self.assertRaisesRegex(RuntimeError, 'missing EPUB') as missing:
             library.catalog(self.root)
+        self.assertIn(str(self.path.resolve()), str(missing.exception))
         with self.assertRaisesRegex(RuntimeError, 'database not found'):
             library.catalog(self.root.parent / 'disconnected')
 

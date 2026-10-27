@@ -149,6 +149,18 @@ class DigestProvider:
             return entry.as_digest()
         return None  # A storage failure was handled; the caller hashes freshly.
 
+    def remember_verified(self, book, result):
+        """Seed an already freshly verified digest without another content read."""
+        self._check_thread()
+        if self._closed:
+            raise RuntimeError('Digest provider is closed')
+        key = CacheKey.from_book(book)
+        self._ensure_unchanged(Path(book['path']), result.fingerprint)
+        if self._can_persist(key):
+            with self._storage_errors():
+                self.store.save(key, CacheEntry.from_digest(result))
+        self._memory[key] = result
+
     def prune_catalog(self, catalog):
         """Prune only an explicitly complete EPUB scan; plain lists prove nothing."""
         self._check_thread()
