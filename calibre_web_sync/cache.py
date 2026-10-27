@@ -19,8 +19,8 @@ SCHEMA_VERSION = 1
 DIGEST_VERSION = 1
 ALGORITHM = 'sha256'
 KEY_COLUMNS = ('library_uuid', 'library_root', 'relative_path', 'format')
-LEGACY_COLUMNS = KEY_COLUMNS + ('size', 'mtime_ns', 'algorithm', 'digest_version', 'sha256')
-COLUMNS = LEGACY_COLUMNS + ('hashed_at_ns', 'last_seen_ns')
+COLUMNS = KEY_COLUMNS + ('size', 'mtime_ns', 'algorithm', 'digest_version',
+                         'sha256', 'hashed_at_ns', 'last_seen_ns')
 CREATE_DIGESTS = '''CREATE TABLE digests (
     library_uuid TEXT NOT NULL,
     library_root TEXT NOT NULL,
@@ -182,20 +182,16 @@ class CachedDigestProvider(UncachedDigestProvider):
         current = (APPLICATION_ID, SCHEMA_VERSION, {('table', 'digests')}, COLUMNS)
         if state == current:
             return
-        # Only an explicitly identified v0 layout is eligible for rebuilding.
-        legacy = (APPLICATION_ID, 0, {('table', 'digests')}, LEGACY_COLUMNS)
         empty = (0, 0, set(), ())
-        if state != legacy and not (created and state == empty):
+        if not (created and state == empty):
             raise sqlite3.DatabaseError('Unrecognized cache schema')
         with connection:
             connection.execute('BEGIN IMMEDIATE')
-            # Another process may have initialized/migrated while this one waited.
+            # Another process may have initialized while this one waited.
             state = self._schema(connection)
             if state == current:
                 return
-            if state == legacy:
-                connection.execute('DROP TABLE digests')
-            elif not (created and state == empty):
+            if not (created and state == empty):
                 raise sqlite3.DatabaseError('Cache schema changed during initialization')
             connection.execute(CREATE_DIGESTS)
             connection.execute(f'PRAGMA application_id={APPLICATION_ID}')
@@ -261,7 +257,10 @@ class CachedDigestProvider(UncachedDigestProvider):
         try:
             with self._connection:
                 self._connection.execute(
-                    'INSERT INTO digests VALUES (?,?,?,?,?,?,?,?,?,?,?) '
+                    'INSERT INTO digests '
+                    '(library_uuid,library_root,relative_path,format,size,mtime_ns,'
+                    'algorithm,digest_version,sha256,hashed_at_ns,last_seen_ns) '
+                    'VALUES (?,?,?,?,?,?,?,?,?,?,?) '
                     'ON CONFLICT(library_uuid,library_root,relative_path,format) DO UPDATE SET '
                     'size=excluded.size,mtime_ns=excluded.mtime_ns,algorithm=excluded.algorithm,'
                     'digest_version=excluded.digest_version,sha256=excluded.sha256,'

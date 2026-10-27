@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from calibre_web_sync import cache
-from calibre_web_sync.library import LibraryIdentity, file_fingerprint
+from calibre_web_sync.library import LibraryIdentity
 
 UUID = '326903a0-15a5-4a37-85a7-6c69cd41dc13'
 OTHER_UUID = '426903a0-15a5-4a37-85a7-6c69cd41dc13'
@@ -93,7 +93,7 @@ with CachedDigestProvider(sys.argv[1]) as provider:
 '''
         result = subprocess.run([sys.executable, '-c', code, str(self.path),
                                  str(self.book['library'].root), UUID],
-                                capture_output=True, text=True, check=True)
+                                capture_output=True, text=True, check=True, timeout=30)
         self.assertEqual(result.stdout.strip(), expected)
 
     def test_ephemeral_reuse_and_fresh_current_stats(self):
@@ -226,9 +226,9 @@ with CachedDigestProvider(sys.argv[1]) as provider:
         self.assertEqual(self.path.read_bytes(), original)
         self.assertEqual(self.query('SELECT * FROM important_data'), [('keep me',)])
 
-    def test_unknown_or_newer_schema_is_not_overwritten(self):
+    def test_unsupported_schema_version_is_not_overwritten(self):
         self.populate()
-        for version in (cache.SCHEMA_VERSION + 1, 999):
+        for version in (0, cache.SCHEMA_VERSION + 1, 999):
             with self.subTest(version=version):
                 self.query(f'PRAGMA user_version={version}')
                 before = self.path.read_bytes()
@@ -237,36 +237,42 @@ with CachedDigestProvider(sys.argv[1]) as provider:
                 self.assertFalse(provider.persistence_enabled)
                 self.assertEqual(self.path.read_bytes(), before)
 
-    def create_legacy(self):
+    def test_older_schema_is_left_untouched(self):
         self.path.parent.mkdir()
-        core_columns = cache.CREATE_DIGESTS.split('    hashed_at_ns')[0].rstrip().rstrip(',')
-        self.query(core_columns + ', PRIMARY KEY (library_uuid,library_root,relative_path,format))')
+        # An independent fixture: no previous format has actually been released.
+        self.query('''CREATE TABLE digests (
+            library_uuid TEXT, library_root TEXT, relative_path TEXT, format TEXT,
+            size INTEGER, mtime_ns INTEGER, algorithm TEXT, digest_version INTEGER,
+            sha256 TEXT,
+            PRIMARY KEY (library_uuid,library_root,relative_path,format)
+        )''')
         self.query(f'PRAGMA application_id={cache.APPLICATION_ID}')
         self.query('PRAGMA user_version=0')
-
-    def test_explicitly_recognized_legacy_schema_rebuilds(self):
-        self.create_legacy()
+        before = self.path.read_bytes()
         provider = self.provider()
-        provider.digest(self.book)
-        self.assertTrue(provider.persistence_enabled)
-        self.assertEqual(self.messages, [])
-        self.assertEqual(self.query('PRAGMA user_version'), [(cache.SCHEMA_VERSION,)])
-        self.assertEqual(self.query('SELECT count(*) FROM digests'), [(1,)])
+        self.assertEqual(provider.digest(self.book), hashlib.sha256(b'original ebook').hexdigest())
+        self.assertFalse(provider.persistence_enabled)
+        self.assertEqual(len(self.messages), 1)
+        self.assertEqual(self.path.read_bytes(), before)
 
-    def test_failed_legacy_rebuild_rolls_back_schema(self):
-        self.create_legacy()
+    def test_failed_initialization_rolls_back_schema(self):
         class FailingConnection(sqlite3.Connection):
             def execute(self, sql, *args):
-                if sql == cache.CREATE_DIGESTS:
-                    raise sqlite3.OperationalError('simulated creation failure')
+                if sql.startswith('PRAGMA user_version='):
+                    raise sqlite3.OperationalError('simulated initialization failure')
                 return super().execute(sql, *args)
-        connection = sqlite3.connect(self.path, factory=FailingConnection)
-        with patch.object(cache.sqlite3, 'connect', return_value=connection):
+        real_connect = sqlite3.connect
+
+        def failing_connect(*args, **kwargs):
+            return real_connect(*args, factory=FailingConnection, **kwargs)
+
+        with patch.object(cache.sqlite3, 'connect', side_effect=failing_connect):
             provider = self.provider()
             provider.digest(self.book)
         self.assertFalse(provider.persistence_enabled)
+        self.assertEqual(self.query('PRAGMA application_id'), [(0,)])
         self.assertEqual(self.query('PRAGMA user_version'), [(0,)])
-        self.assertEqual(tuple(r[1] for r in self.query('PRAGMA table_info(digests)')), cache.LEGACY_COLUMNS)
+        self.assertEqual(self.query("SELECT name FROM sqlite_master WHERE type='table'"), [])
 
     def test_permission_failure_falls_back_once(self):
         provider = self.provider()
