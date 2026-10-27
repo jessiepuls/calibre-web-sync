@@ -77,7 +77,7 @@ class StoreTests(unittest.TestCase):
             self.store().lookup(self.key)
         self.assertEqual(self.path.read_bytes(), before)
 
-    def test_failed_initialization_rolls_back_schema(self):
+    def test_failed_initialization_does_not_publish_partial_schema(self):
         class FailingConnection(sqlite3.Connection):
             def execute(self, sql, *args):
                 if sql.startswith('PRAGMA user_version='):
@@ -91,9 +91,9 @@ class StoreTests(unittest.TestCase):
         with patch('calibre_web_sync.cache_store.sqlite3.connect', side_effect=failing_connect):
             with self.assertRaises(CacheStorageError):
                 self.store().lookup(self.key)
-        self.assertEqual(self.query('PRAGMA application_id'), [(0,)])
-        self.assertEqual(self.query('PRAGMA user_version'), [(0,)])
-        self.assertEqual(self.query("SELECT name FROM sqlite_master WHERE type='table'"), [])
+        self.assertFalse(self.path.exists())
+        self.assertEqual(list(self.path.parent.glob('.hash-cache-init-*')), [])
+        self.assertIsNone(self.store().lookup(self.key))
 
     def test_interrupted_transaction_preserves_completed_entry(self):
         store = self.store()

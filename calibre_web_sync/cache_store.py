@@ -1,11 +1,13 @@
 """SQLite persistence for named digest entries, independent of file hashing."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 import errno
 import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
+import tempfile
 import threading
 import time
 from typing import Optional
@@ -87,11 +89,6 @@ class CacheSchema:
         return (self.application_id == APPLICATION_ID and self.version == SCHEMA_VERSION
                 and self.objects == {('table', 'digests')} and self.columns == COLUMNS)
 
-    @property
-    def is_empty(self):
-        return (self.application_id == 0 and self.version == 0
-                and not self.objects and not self.columns)
-
 
 class CacheStorageError(RuntimeError):
     """Storage failed; the caller decides whether to continue without persistence."""
@@ -135,12 +132,19 @@ class SQLiteDigestStore:
     lookup returns an entry without updating it. save atomically writes exactly
     the supplied entry. Neither method reads ebook contents or emits diagnostics.
     Create, use, and close each store on a single thread.
+
+    Use a private per-user cache tree. Directory/file ownership and permission bits
+    are checked; pinned descriptors detect pathname replacement before operations.
+    Processes running as the same user are not treated as adversaries. New caches
+    are built privately, then published without replacing an existing pathname.
     """
 
     def __init__(self, path, *, timeout=0.1):
-        self.path = Path(path).expanduser()
+        self.path = Path(path).expanduser().absolute()
         self.timeout = timeout
         self._connection = None
+        self._directory_fd = None
+        self._file_fd = None
         self._closed = False
         self._owner = threading.current_thread()
 
@@ -164,7 +168,15 @@ class SQLiteDigestStore:
             raise CacheStorageError.from_exception(error) from error
         else:
             self._connection = None
+            self._close_file_handles()
             self._closed = True
+
+    def _close_file_handles(self):
+        for name in ('_file_fd', '_directory_fd'):
+            descriptor = getattr(self, name)
+            if descriptor is not None:
+                os.close(descriptor)
+                setattr(self, name, None)
 
     @contextmanager
     def _database(self):
@@ -187,50 +199,102 @@ class SQLiteDigestStore:
             columns=tuple(row['name'] for row in connection.execute('PRAGMA table_info(digests)')),
         )
 
-    def _prepare(self, connection, created):
-        schema = self._schema(connection)
-        if schema.is_current:
-            return
-        if not (created and schema.is_empty):
-            raise CacheStorageError('Unrecognized cache schema',
-                                    'Choose a different cache location; this file was left unchanged.')
-        with connection:
+    def _build_database(self, staged):
+        """Build a complete database before its final pathname becomes visible."""
+        with closing(sqlite3.connect(staged, timeout=self.timeout)) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
-            schema = self._schema(connection)
-            if schema.is_current:
-                return
-            if not (created and schema.is_empty):
-                raise CacheStorageError('Cache schema changed during initialization',
-                                        'Retry after the other initialization finishes.')
             connection.execute(CREATE_DIGESTS)
             connection.execute(f'PRAGMA application_id={APPLICATION_ID}')
             connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
 
-    def _open(self):
-        if self._connection is not None:
-            return
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if self.path.is_symlink():
-            raise CacheStorageError('Cache path is a symlink', 'Choose a non-symlink cache file.')
-        created = False
+    def _publish_database(self, staged):
         try:
-            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            # A hard link publishes completed bytes atomically and never replaces
+            # a winner from another initializer. Both paths are on one filesystem.
+            os.link(staged, self.path.name, dst_dir_fd=self._directory_fd,
+                    follow_symlinks=False)
         except FileExistsError:
             pass
-        else:
-            os.close(fd)
-            created = True
-        connection = sqlite3.connect(self.path, timeout=self.timeout)
-        connection.row_factory = sqlite3.Row
+
+    def _initialize(self):
+        with tempfile.TemporaryDirectory(prefix='.hash-cache-init-', dir=self.path.parent) as directory:
+            staged = Path(directory) / 'hashes.sqlite3'
+            self._build_database(staged)
+            staged.chmod(0o600)
+            self._validate_directory()
+            self._publish_database(staged)
+
+    @staticmethod
+    def _safe_attributes(attributes, *, directory):
+        correct_type = stat.S_ISDIR if directory else stat.S_ISREG
+        return (correct_type(attributes.st_mode) and attributes.st_uid == os.getuid()
+                and not attributes.st_mode & 0o022)
+
+    @staticmethod
+    def _same_file(left, right):
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+    def _validate_directory(self):
+        opened = os.fstat(self._directory_fd)
+        current = self.path.parent.lstat()
+        if not self._safe_attributes(current, directory=True):
+            raise CacheStorageError('Unsafe cache directory',
+                                    'Use a user-owned cache directory not writable by other users.')
+        if not self._same_file(opened, current):
+            raise CacheStorageError('Cache directory changed while opening it',
+                                    'Retry with a stable, private cache directory.')
+
+    def _validate_location(self):
+        self._validate_directory()
+        current = self.path.lstat()
+        opened = os.fstat(self._file_fd)
+        if not self._safe_attributes(current, directory=False) or not self._same_file(opened, current):
+            raise CacheStorageError('Cache file changed or has unsafe permissions',
+                                    'Use a stable, user-owned regular cache file not writable by others.')
+
+    def _open_directory(self):
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.path = self.path.parent.resolve() / self.path.name
+        self._directory_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self._validate_directory()
+
+    def _open_file(self):
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+        return os.open(self.path.name, flags, dir_fd=self._directory_fd)
+
+    def _open_or_initialize_file(self):
         try:
-            if connection.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-                raise CacheStorageError('Cache integrity check failed',
-                                        'Remove the disposable cache file to rebuild it on a later run.')
-            self._prepare(connection, created)
+            self._file_fd = self._open_file()
+        except FileNotFoundError:
+            self._initialize()
+            self._file_fd = self._open_file()
+        self._validate_location()
+
+    def _validate_database(self, connection):
+        if connection.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+            raise CacheStorageError('Cache integrity check failed',
+                                    'Remove the disposable cache file to rebuild it on a later run.')
+        if not self._schema(connection).is_current:
+            raise CacheStorageError('Unrecognized cache schema',
+                                    'Choose a different cache location; this file was left unchanged.')
+
+    def _open(self):
+        if self._connection is not None:
+            self._validate_location()
+            return
+        try:
+            self._open_directory()
+            self._open_or_initialize_file()
+            # mode=rw prevents SQLite from recreating a pathname removed between
+            # our descriptor open and its own pathname-based open.
+            self._connection = sqlite3.connect(self.path.as_uri() + '?mode=rw',
+                                               uri=True, timeout=self.timeout)
+            self._connection.row_factory = sqlite3.Row
+            self._validate_location()  # Before SQLite reads or writes the database.
+            self._validate_database(self._connection)
         except (OSError, sqlite3.Error, CacheStorageError):
-            connection.close()
+            self.close()
             raise
-        self._connection = connection
 
     def lookup(self, key):
         with self._database() as connection:
