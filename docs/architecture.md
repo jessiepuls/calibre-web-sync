@@ -1,15 +1,18 @@
 # Architecture
 
-Keep sync behavior independent of its user interface so a future Calibre plugin
-can share the same comparison, transfer, and conflict logic as the CLI.
+The command-line interface coordinates catalog comparison, authentication,
+EPUB uploads, and verification. Library reads use temporary database snapshots;
+uploads go through Calibre-Web's web interface.
 
 ```text
 calibre_web_sync/
   library.py       Read catalog snapshots, normalize metadata, hash EPUBs
   planner.py       Classify missing books, identical files, and edition conflicts
+  cache.py         Coordinate digest reuse, fingerprints, and cache fallback
+  cache_store.py   Persist disposable hashes in a per-user SQLite database
   credentials.py   Retrieve the named 1Password item without persisting secrets
   client.py        Calibre-Web HTTP login, CSRF, uploads, response handling
-  engine.py        Verify uploaded files; home for future transfer orchestration
+  engine.py        Verify uploaded files through the mounted server library
   cli.py           Arguments, local config, authentication, progress, execution
   __main__.py      python3 -m calibre_web_sync entry point
 sync.py            Compatibility command wrapper
@@ -18,21 +21,32 @@ config.local.json    Ignored machine-specific settings
 tests/              Regression tests (no real library or network access)
 ```
 
-The catalog and plan currently use dictionaries. Keep these stable while extracting
-shared execution logic from the CLI when a second interface needs it. Avoid
-placeholder abstractions until there is working behavior to share.
+## Comparison
 
-## Next steps
+`library.catalog` returns a complete `LibraryCatalog` containing library identity
+and book dictionaries. The planner returns a list of book dictionaries with
+digests, status, and comparison reasons. It compares EPUB contents, uses matching
+title/author metadata to flag edition review, and identifies local duplicates.
+Neither catalog discovery nor planning modifies either library.
 
-1. Persistent hash cache outside the code tree, keyed by library identity, path,
-   file size, and modification time. Re-read catalogs every run; invalidate changed
-   files; offer a full rehash. Do not cache passwords, sessions, or conclusions that
-   a server entry exists without checking the current catalog.
-2. Verify just the uploaded book instead of rescanning the entire remote catalog.
-3. Extract the upload loop from the CLI into the engine as shared execution logic.
-4. Two-way transfer planning with explicit edition and metadata conflict policies.
-5. Optional Calibre plugin UI calling the same core. No plugin stub or packaging
-   is required yet.
+## Digest caching
 
-No persistent cache or two-way sync is implemented in this initial version.
-Choose a license before distributing the project publicly.
+The CLI supplies a cached digest provider to the planner, scoped to comparison.
+Storage is opened lazily and failures fall back to fresh hashing. `--no-cache`
+uses the same provider without a persistent store. Cache keys include library
+UUID, resolved root, relative path, and format; size and nanosecond modification
+time determine reuse. Complete fresh catalogs authorize pruning stale EPUB
+entries. Upload verification uses fresh hashes independently of this provider.
+
+## Uploads and verification
+
+The CLI selects missing books and explicitly included review entries. For each
+upload it stages a copy, freshly hashes it against the planned digest, and sends
+it through the authenticated client. Upload requests are not automatically retried
+because a failed response may follow a committed upload.
+
+After each upload, `engine.verify_upload` reads fresh server catalogs and checks
+the EPUB for the returned server book ID against the planned digest. It retries
+verification for delayed visibility and stops the run if verification fails.
+The next upload starts only after the previous one is verified. A checkout lock
+prevents overlapping runs from the same repository.

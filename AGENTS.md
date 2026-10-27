@@ -21,8 +21,8 @@ Application code lives in `calibre_web_sync/`:
 
 `sync.py` is the command wrapper. Tests live in `tests/`. Machine-specific settings
 live in ignored `config.local.json`; `config.example.json` is the portable example.
-The planner accepts cached or uncached digest providers; CLI caching controls
-are not yet implemented, so normal script runs still use uncached comparison.
+The CLI owns a digest provider for comparison. Persistent caching defaults to
+the per-user OS cache directory; `--no-cache` bypasses persistent storage.
 
 ## Readability
 

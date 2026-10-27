@@ -2,7 +2,9 @@
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import logging
+import os
 from pathlib import Path
+import sys
 import threading
 import time
 
@@ -20,6 +22,16 @@ class CacheStats:
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def default_cache_dir():
+    """Return the per-user cache location without creating directories."""
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Caches' / 'calibre-web-sync'
+    base = os.environ.get('XDG_CACHE_HOME')
+    # The XDG specification requires an absolute path; ignore relative values.
+    root = Path(base) if base and Path(base).is_absolute() else Path.home() / '.cache'
+    return root / 'calibre-web-sync'
 
 
 class DigestProvider:

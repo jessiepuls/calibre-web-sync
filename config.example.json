@@ -2,5 +2,6 @@
   "local": "/path/to/local/Calibre Library",
   "remote": "/path/to/mounted/server/books",
   "op_item": "Calibre-Web",
-  "op_vault": "Private"
+  "op_vault": "Private",
+  "cache": true
 }

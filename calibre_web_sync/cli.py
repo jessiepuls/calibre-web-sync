@@ -12,6 +12,8 @@ import tempfile
 import urllib.error
 
 from .client import Client
+from .cache import DigestProvider, default_cache_dir
+from .cache_store import SQLiteDigestStore
 from .credentials import onepassword_credentials
 from .engine import verify_upload
 from .library import catalog, digest
@@ -37,7 +39,7 @@ def authenticated_client(args):
         del password
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, help='Local JSON configuration file')
     parser.add_argument('--local', type=Path)
@@ -51,6 +53,12 @@ def main():
     parser.add_argument('--apply', action='store_true', help='Upload missing books; default is dry-run')
     parser.add_argument('--include-review', type=int, nargs='+', default=[], metavar='LOCAL_ID', help='Explicitly upload these edition-review entries as separate books')
     parser.add_argument('--limit', type=int, help='Maximum number of uploads in this run')
+    cache_options = parser.add_mutually_exclusive_group()
+    cache_options.add_argument('--cache', dest='cache', action='store_true', help='Enable persistent hash caching (default)')
+    cache_options.add_argument('--no-cache', dest='cache', action='store_false', help='Do not read or write persistent hash caches')
+    parser.set_defaults(cache=True)
+    parser.add_argument('--rehash', action='store_true', help='Ignore stored hashes and refresh them; requires caching')
+    parser.add_argument('--cache-dir', type=Path, help='Directory for hashes.sqlite3')
     config_args, _ = parser.parse_known_args()
     config_path = config_args.config or HERE / 'config.local.json'
     if config_args.config or config_path.is_file():
@@ -58,11 +66,13 @@ def main():
             config = json.loads(config_path.read_text())
         except (OSError, ValueError):
             parser.error('Cannot read configuration JSON')
-        allowed = {'local', 'remote', 'url', 'username', 'op_item', 'op_vault', 'op_account'}
+        allowed = {'local', 'remote', 'url', 'username', 'op_item', 'op_vault', 'op_account', 'cache', 'cache_dir'}
         if not isinstance(config, dict) or set(config) - allowed:
             parser.error('Configuration contains unknown settings')
-        if any(not isinstance(value, str) for value in config.values()):
-            parser.error('Configuration values must be strings')
+        for key, value in config.items():
+            expected = bool if key == 'cache' else str
+            if not isinstance(value, expected):
+                parser.error(f'Configuration {key} must be a {expected.__name__}')
         parser.set_defaults(**config)
     args = parser.parse_args()
     args.local = Path(args.local) if args.local else Path.cwd()
@@ -75,6 +85,13 @@ def main():
         parser.error('--check-login cannot be combined with --apply')
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
+    if args.rehash and not args.cache:
+        parser.error('--rehash requires caching; use --cache --rehash to override configuration')
+    return parser, args
+
+
+def main():
+    parser, args = parse_args()
     lock = (HERE / '.sync.lock').open('a')
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -90,8 +107,13 @@ def main():
         if local == remote:
             parser.error('Local and remote library must differ')
         print('Reading catalogs and comparing EPUBs (the shared folder must be mounted)...', flush=True)
-        plan = make_plan(catalog(local), catalog(remote),
-                         progress=lambda done, total: print(f'Comparing {done}/{total}...', flush=True))
+        store = None
+        if args.cache:
+            directory = Path(args.cache_dir).expanduser() if args.cache_dir else default_cache_dir()
+            store = SQLiteDigestStore(directory / 'hashes.sqlite3')
+        with DigestProvider(store, rehash=args.rehash) as provider:
+            plan = make_plan(catalog(local), catalog(remote), digest_provider=provider,
+                             progress=lambda done, total: print(f'Comparing {done}/{total}...', flush=True))
         counts = collections.Counter(b['status'] for b in plan)
         print(' | '.join(f'{key}: {counts[key]}' for key in ('missing', 'present', 'review', 'duplicate-local')))
         allowed = set(args.include_review)

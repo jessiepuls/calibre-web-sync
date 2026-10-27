@@ -4,7 +4,7 @@ Sync books between a local Calibre library and Calibre-Web.
 
 Currently supports incremental **local → server EPUB uploads**, content-based duplicate
 detection, edition review, upload verification, and optional 1Password authentication.
-Two-way sync and caching are planned.
+Comparison hashes are cached between runs.
 
 Python 3.9+ on macOS/Linux. No installation or third-party Python packages required.
 Calibre-Web must be running, and its book directory must be mounted locally for
@@ -29,7 +29,7 @@ required for comparisons and uploads.
 ## Run
 
 ```sh
-# Preview; no login or uploads
+# Preview; no login or uploads (may populate the hash cache)
 python3 sync.py
 
 # Test authentication only
@@ -60,6 +60,37 @@ python3 sync.py --apply --include-review LOCAL_ID
 
 Replace `LOCAL_ID` with an ID currently marked `REVIEW`. The script also uploads
 ordinary missing books in that run. Use `--help` for all flags.
+
+## Hash caching
+
+Caching is enabled by default. Unchanged EPUBs reuse SHA-256 hashes while their
+size and modification time match. Catalogs are read again every run; cached
+hashes do not establish whether a book still exists. Edits that preserve both
+size and modification time require a forced refresh. Upload verification always
+reads the uploaded bytes freshly.
+
+```sh
+python3 sync.py --no-cache             # No persistent cache reads or writes
+python3 sync.py --rehash               # Recompute and refresh stored hashes
+python3 sync.py --cache-dir /path/to/cache
+```
+
+Set `"cache": false` in the JSON configuration to disable caching by default.
+Use `--cache` to enable it for one run, or `--cache --rehash` to force a refresh
+with that configuration. `--cache` and `--no-cache` override configuration and
+cannot be combined. `--rehash` requires enabled caching. Setting `cache_dir`
+(a JSON string) or `--cache-dir` changes placement without enabling caching.
+
+The database is `hashes.sqlite3` beneath the selected cache directory:
+
+- macOS: `~/Library/Caches/calibre-web-sync/`
+- Linux: `$XDG_CACHE_HOME/calibre-web-sync/`, or `~/.cache/calibre-web-sync/`
+  when the variable is unset or is not an absolute path.
+
+Preview runs may write the cache; `--check-login` never opens it. Cache failures
+produce a warning and comparison continues with fresh hashes. Cache data is
+disposable: remove the database while no sync is running to rebuild it next time.
+Missing library UUIDs disable persistent caching for that library.
 
 ## Authentication
 
@@ -101,7 +132,8 @@ Enable Uploads**, and grant the account **Upload** permission under **Admin → 
 - Prevents concurrent runs from this checkout. Avoid other imports while syncing.
 - Uses web form endpoints, not a versioned public API; compatibility may change
   with Calibre-Web upgrades.
-- No persistent cache yet: comparison can take minutes on a slow share.
+- Warm comparisons avoid rereading unchanged EPUB contents; catalog and file
+  attribute checks still require access to the shared folder.
 
 ## Development
 
@@ -110,7 +142,7 @@ python3 -m unittest discover -s tests -v
 ```
 
 Tests use temporary catalogs and an in-memory HTTP transport; no real credentials
-or server access are needed. See [architecture and next steps](docs/architecture.md).
+or server access are needed. See [architecture](docs/architecture.md).
 
 Implementation references:
 [Calibre-Web upload handler](https://github.com/janeczku/calibre-web/blob/master/cps/editbooks.py),

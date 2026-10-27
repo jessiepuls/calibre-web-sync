@@ -104,7 +104,7 @@ class SyncTests(unittest.TestCase):
                             c.commit()
                         return Response(b'{"location":"/cw/admin/book/10"}',request.full_url)
                     raise AssertionError(path)
-            (root/'config.json').write_text('{}')
+            (root/'config.json').write_text(json.dumps({'cache_dir': str(root/'cache')}))
             args=['sync.py','--config',str(root/'config.json'),'--local',str(root/'local'),'--remote',str(root/'remote'),'--apply','--url','http://test.invalid/cw','--username','user']
             with patch.object(urllib.request,'build_opener',return_value=Transport()):
                 with patch('sys.argv',args),patch.object(sync.getpass,'getpass',return_value='secret'),contextlib.redirect_stdout(io.StringIO()):sync.main()
