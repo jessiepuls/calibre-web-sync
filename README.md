@@ -20,7 +20,6 @@ cp config.example.json config.local.json
 
 Edit `config.local.json` to set your library paths and 1Password item reference.
 This file is ignored by Git. It contains references, not a password.
-An existing local configuration has already been prepared for the original setup.
 
 CLI flags override configuration. Use `--config PATH` for another configuration.
 Without a configured local path, the current directory is used. A remote path is
@@ -63,22 +62,44 @@ ordinary missing books in that run. Use `--help` for all flags.
 
 ## Hash caching
 
-Caching is enabled by default. Unchanged EPUBs reuse SHA-256 hashes while their
-size and modification time match. Catalogs are read again every run; cached
-hashes do not establish whether a book still exists. Edits that preserve both
-size and modification time require a forced refresh. Upload verification always
-reads the uploaded bytes freshly.
+Caching is enabled by default. SHA-256 hashes are reused while EPUB size and
+modification time match, with no automatic expiry. Catalogs are read again every
+run. The first run must calculate any needed hashes that are not already cached.
+
+Size and modification time are a practical trust signal, not proof that contents
+are unchanged. Timestamp-preserving edits can remain cached, and network shares
+may report attributes with limited precision or delay. Use `--rehash` to refresh
+hashes needed by the comparison, or `--no-cache` to compare using fresh hashes
+without persistent storage. Server candidates are hashed only when their sizes
+match a local EPUB, so neither option hashes every server EPUB.
 
 ```sh
 python3 sync.py --no-cache             # No persistent cache reads or writes
-python3 sync.py --rehash               # Recompute and refresh stored hashes
+python3 sync.py --rehash               # Refresh hashes needed for this comparison
 python3 sync.py --cache-dir /path/to/cache
 ```
 
 Set `"cache": false` in the JSON configuration to disable caching by default.
-Use `--cache` to enable it for one run, or `--cache --rehash` to force a refresh
-with that configuration. `--cache` and `--no-cache` override configuration and
-cannot be combined. `--rehash` requires enabled caching. Setting `cache_dir`
+For example, a configuration without authentication settings can contain:
+
+```json
+{
+  "local": "/path/to/local/Calibre Library",
+  "remote": "/path/to/mounted/server/books",
+  "cache": false
+}
+```
+
+With that configuration:
+
+```sh
+python3 sync.py                       # Compare without persistent caching
+python3 sync.py --cache               # Enable caching for this run
+python3 sync.py --cache --rehash       # Enable caching and refresh needed hashes
+```
+
+`--cache` and `--no-cache` override configuration and cannot be combined.
+`--rehash` requires enabled caching. Setting `cache_dir`
 (a JSON string) or `--cache-dir` changes placement without enabling caching.
 
 The database is `hashes.sqlite3` beneath the selected cache directory:
@@ -88,9 +109,19 @@ The database is `hashes.sqlite3` beneath the selected cache directory:
   when the variable is unset or is not an absolute path.
 
 Preview runs may write the cache; `--check-login` never opens it. Cache failures
-produce a warning and comparison continues with fresh hashes. Cache data is
-disposable: remove the database while no sync is running to rebuild it next time.
-Missing library UUIDs disable persistent caching for that library.
+such as corruption, unsupported schemas, lock contention, or unwritable storage
+produce one warning and comparison continues with fresh hashes. Unrecognized or
+damaged databases are left intact. Errors reading the actual libraries still stop
+the run. For a busy cache, wait for the other run to finish; for a damaged cache,
+stop all sync runs using it, remove `hashes.sqlite3` from the selected cache
+directory, and run again to rebuild it.
+
+The cache is disposable acceleration state; it is not sync history and does not
+record deletions or prove that a server book still exists. Missing library UUIDs
+disable persistent caching for that library. In-run hash reuse works with caching
+enabled or disabled.
+Each upload is verified immediately from fresh server bytes before the next
+upload starts; only a successful verification seeds the enabled cache.
 
 Each comparison reports elapsed time, persistent cache hits/misses, in-run hash
 reuse, and files/bytes freshly hashed. These numbers exclude upload staging and

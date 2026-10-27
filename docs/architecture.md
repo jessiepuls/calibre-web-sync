@@ -41,6 +41,18 @@ entries. Upload verification reads fresh bytes independently of cache hits and
 seeds the provider only after the digest matches and the file fingerprint is
 still unchanged. Disabled caching also disables persistence of verified hashes.
 
+Size and modification time do not prove content identity: timestamp-preserving
+edits can remain cached, and network-share attribute precision and visibility vary.
+The cache is disposable acceleration state, not sync history or evidence that a
+server book exists. Entries have no automatic expiry. A forced rehash or
+disabled-cache run freshly hashes files needed by the comparison; size filtering
+still skips unrelated server EPUBs. In-run reuse remains available in both modes.
+
+The CLI resolves explicit cache enable/disable flags before JSON configuration,
+with caching enabled by default. Storage failures warn once and disable persistence
+for the run; library/file errors propagate. Missing UUIDs bypass persistence only
+for the affected library. Existing unknown or damaged databases are preserved.
+
 The CLI reports comparison statistics immediately after planning. Elapsed time
 includes catalog snapshots, file checks, hashing, cache access, and pruning.
 Hash counters describe completed fresh content reads by the comparison provider;
