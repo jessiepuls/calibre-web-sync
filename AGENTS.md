@@ -21,7 +21,8 @@ Application code lives in `calibre_web_sync/`:
 
 `sync.py` is the command wrapper. Tests live in `tests/`. Machine-specific settings
 live in ignored `config.local.json`; `config.example.json` is the portable example.
-Cache providers exist but are not yet wired into the comparison/CLI workflow.
+The planner accepts cached or uncached digest providers; CLI caching controls
+are not yet implemented, so normal script runs still use uncached comparison.
 
 ## Readability
 
@@ -54,6 +55,12 @@ Never print or commit credentials or machine-specific local configuration.
 
 Keep changes focused and pause at agreed review/commit checkpoints. The user
 handles commits unless delegated. Reserve `docs/` for maintained documentation.
+
+Keep documentation consistent with the code as part of each change. The README
+should help a new user understand the tool, configure it, and run common commands.
+Put longer explanations in `docs/` and link them from the README where useful.
+Check that affected examples and defaults remain accurate. When a change reveals
+a documentation gap, suggest a focused addition and explain who it would help.
 
 For requested broad reviews, use
 [review-changes](.agents/skills/review-changes/SKILL.md). Do not run the full review

@@ -332,3 +332,32 @@ class SQLiteDigestStore:
                     'size=excluded.size,mtime_ns=excluded.mtime_ns,algorithm=excluded.algorithm,'
                     'digest_version=excluded.digest_version,sha256=excluded.sha256,'
                     'hashed_at_ns=excluded.hashed_at_ns,last_seen_ns=excluded.last_seen_ns', values)
+
+    def prune_epubs(self, library, keys):
+        """Atomically prune one library's EPUBs using its complete observed set.
+
+        Temporary rows avoid SQLite's parameter limit for large catalogs. Other
+        namespaces and formats are never affected. The caller supplies scan proof.
+        """
+        self._check_thread()
+        if library.namespace is None:
+            return 0
+        observed = []
+        for key in keys:
+            if (key.library_uuid, key.library_root) != library.namespace or key.format != 'EPUB':
+                raise ValueError('Pruning keys must belong to the scanned library and EPUB format')
+            observed.append((key.relative_path, key.format))
+
+        with self._database() as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
+            connection.execute('CREATE TEMP TABLE observed_epubs '
+                               '(relative_path TEXT, format TEXT, PRIMARY KEY(relative_path,format))')
+            connection.executemany('INSERT OR IGNORE INTO observed_epubs '
+                                   '(relative_path,format) VALUES (?,?)', observed)
+            deleted = connection.execute(
+                "DELETE FROM digests WHERE library_uuid=? AND library_root=? AND format='EPUB' "
+                'AND NOT EXISTS (SELECT 1 FROM observed_epubs '
+                'WHERE observed_epubs.relative_path=digests.relative_path '
+                'AND observed_epubs.format=digests.format)', library.namespace).rowcount
+            connection.execute('DROP TABLE observed_epubs')
+            return deleted

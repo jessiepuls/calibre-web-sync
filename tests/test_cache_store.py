@@ -12,7 +12,7 @@ from calibre_web_sync.cache_store import (
     APPLICATION_ID, SCHEMA_VERSION, CacheEntry, CacheKey, CacheStorageError,
     SQLiteDigestStore,
 )
-from calibre_web_sync.library import FileFingerprint
+from calibre_web_sync.library import FileFingerprint, LibraryIdentity
 
 
 class StoreTests(unittest.TestCase):
@@ -149,6 +149,65 @@ class StoreTests(unittest.TestCase):
         self.store().save(self.key, self.entry)
         self.assertEqual(self.query('PRAGMA application_id'), [(APPLICATION_ID,)])
         self.assertEqual(self.query('PRAGMA user_version'), [(SCHEMA_VERSION,)])
+
+    def test_pruning_is_limited_to_the_observed_library_and_epubs(self):
+        store = self.store()
+        keep = replace(self.key, relative_path='kept.epub')
+        other_root = replace(self.key, library_root=str(self.root / 'other-library'))
+        other_uuid = replace(self.key, library_uuid='426903a0-15a5-4a37-85a7-6c69cd41dc13')
+        other_format = replace(self.key, format='MOBI')
+        for key in (self.key, keep, other_root, other_uuid, other_format):
+            store.save(key, self.entry)
+        identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
+        self.assertEqual(store.prune_epubs(identity, {keep}), 1)
+        self.assertIsNone(store.lookup(self.key))
+        for key in (keep, other_root, other_uuid, other_format):
+            self.assertEqual(store.lookup(key), self.entry)
+
+    def test_pruning_large_catalogs_avoids_parameter_limits(self):
+        store = self.store()
+        obsolete = replace(self.key, relative_path='obsolete.epub')
+        store.save(self.key, self.entry)
+        store.save(obsolete, self.entry)
+        if hasattr(store._connection, 'setlimit'):
+            store._connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 10)
+        observed = {replace(self.key, relative_path=f'book-{number}.epub') for number in range(2000)}
+        observed.add(self.key)
+        identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
+        self.assertEqual(store.prune_epubs(identity, observed), 1)
+        self.assertEqual(store.lookup(self.key), self.entry)
+        self.assertIsNone(store.lookup(obsolete))
+
+    def test_failed_pruning_rolls_back_and_can_be_retried(self):
+        store = self.store()
+        store.save(self.key, self.entry)
+        other = replace(self.key, relative_path='second.epub')
+        store.save(other, self.entry)
+        identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
+        self.query("""CREATE TRIGGER fail_delete BEFORE DELETE ON digests
+                   BEGIN SELECT RAISE(ABORT, 'simulated failure'); END""")
+        with self.assertRaises(CacheStorageError):
+            store.prune_epubs(identity, set())
+        self.assertEqual(store.lookup(self.key), self.entry)
+        self.assertEqual(store.lookup(other), self.entry)
+        self.query('DROP TRIGGER fail_delete')
+        self.assertEqual(store.prune_epubs(identity, set()), 2)
+        self.assertEqual(store.prune_epubs(identity, set()), 0)
+
+    def test_pruning_rejects_mixed_namespaces_or_formats_before_opening_storage(self):
+        identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
+        keys = [replace(self.key, library_uuid='other'),
+                replace(self.key, library_root='other'), replace(self.key, format='MOBI')]
+        for key in keys:
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    self.store().prune_epubs(identity, {key})
+        self.assertFalse(self.path.exists())
+
+    def test_missing_identity_cannot_prune_or_open_storage(self):
+        identity = LibraryIdentity(None, Path(self.key.library_root))
+        self.assertEqual(self.store().prune_epubs(identity, set()), 0)
+        self.assertFalse(self.path.exists())
 
 
 if __name__ == '__main__':

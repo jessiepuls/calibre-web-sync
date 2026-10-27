@@ -38,6 +38,23 @@ class FileDigest:
     fingerprint: FileFingerprint
 
 
+@dataclass(frozen=True)
+class LibraryCatalog:
+    """A completed EPUB scan, retaining identity even when no books remain."""
+
+    library: LibraryIdentity
+    books: tuple
+
+    def __iter__(self):
+        return iter(self.books)
+
+    def __len__(self):
+        return len(self.books)
+
+    def __getitem__(self, index):
+        return self.books[index]
+
+
 def library_identity(connection, root):
     """Read identity from the catalog snapshot without inventing a fallback UUID."""
     root = Path(root).resolve()
@@ -126,6 +143,7 @@ def snapshot(root, destination):
 
 
 def catalog(root):
+    """Return a complete EPUB snapshot, or raise without returning a partial scan."""
     root = Path(root).resolve()
     with tempfile.TemporaryDirectory(prefix='calibre-sync-db-') as temporary:
         copied = Path(temporary) / 'metadata.db'
@@ -152,6 +170,6 @@ def catalog(root):
                               'relative_path': path.relative_to(root), 'format': 'EPUB',
                               'size': attributes.st_size, 'mtime_ns': attributes.st_mtime_ns,
                               'key': (normalize(title), tuple(sorted(normalize(a) for a in authors[bid])))})
-            return books
+            return LibraryCatalog(identity, tuple(books))
         finally:
             c.close()

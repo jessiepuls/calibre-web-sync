@@ -7,7 +7,7 @@ import threading
 import time
 
 from .cache_store import CacheEntry, CacheKey, CacheStorageError, ThreadConfinementError
-from .library import file_fingerprint, stable_digest
+from .library import LibraryCatalog, file_fingerprint, stable_digest
 
 
 @dataclass
@@ -136,6 +136,20 @@ class DigestProvider:
             self.stats.persistent_hits += 1
             return entry.as_digest()
         return None  # A storage failure was handled; the caller hashes freshly.
+
+    def prune_catalog(self, catalog):
+        """Prune only an explicitly complete EPUB scan; plain lists prove nothing."""
+        self._check_thread()
+        if self._closed:
+            raise RuntimeError('Digest provider is closed')
+        if self.store is None or not isinstance(catalog, LibraryCatalog):
+            return 0
+        if catalog.library.namespace is None:
+            return 0
+        keys = {CacheKey.from_book(book) for book in catalog}
+        with self._storage_errors():
+            return self.store.prune_epubs(catalog.library, keys)
+        return 0
 
     @staticmethod
     def _ensure_unchanged(path, fingerprint):
