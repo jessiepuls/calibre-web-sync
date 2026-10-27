@@ -91,10 +91,11 @@ class SyncTests(unittest.TestCase):
                         if b'password=secret' in body and b'csrf_token=token' in body:
                             self.authenticated=True
                             return Response(b'<input name="csrf_token" value="token">',request.full_url.replace('/login','/'))
-                        raise urllib.error.HTTPError(request.full_url,401,'Unauthorized',{},None)
+                        # HTTPError.close() needs a response stream on Python 3.9.
+                        raise urllib.error.HTTPError(request.full_url,401,'Unauthorized',{},io.BytesIO())
                     if path=='/cw/upload':
                         if not self.authenticated or request.get_header('X-csrftoken')!='token':
-                            raise urllib.error.HTTPError(request.full_url,403,'Forbidden',{},None)
+                            raise urllib.error.HTTPError(request.full_url,403,'Forbidden',{},io.BytesIO())
                         msg=BytesParser(policy=default).parsebytes(b'Content-Type: '+request.get_header('Content-type').encode()+b'\r\n\r\n'+body)
                         payload=next(p.get_payload(decode=True) for p in msg.iter_parts() if p.get_param('name',header='Content-Disposition')=='btn-upload')
                         uploads.append(payload)
