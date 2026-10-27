@@ -353,11 +353,12 @@ class SQLiteDigestStore:
                 'AND algorithm=:algorithm AND digest_version=:digest_version '
                 'AND sha256=:sha256 AND hashed_at_ns=:hashed_at_ns', values)
 
-    def prune_epubs(self, library, keys):
+    def prune_epubs(self, library, keys, *, before_ns):
         """Atomically prune one library's EPUBs using its complete observed set.
 
         Temporary rows avoid SQLite's parameter limit for large catalogs. Other
         namespaces and formats are never affected. The caller supplies scan proof.
+        Entries hashed or observed at/after scan start survive this older scan.
         """
         self._check_thread()
         if library.namespace is None:
@@ -376,8 +377,10 @@ class SQLiteDigestStore:
                                    '(relative_path,format) VALUES (?,?)', observed)
             deleted = connection.execute(
                 "DELETE FROM digests WHERE library_uuid=? AND library_root=? AND format='EPUB' "
+                'AND hashed_at_ns<? AND last_seen_ns<? '
                 'AND NOT EXISTS (SELECT 1 FROM observed_epubs '
                 'WHERE observed_epubs.relative_path=digests.relative_path '
-                'AND observed_epubs.format=digests.format)', library.namespace).rowcount
+                'AND observed_epubs.format=digests.format)',
+                (*library.namespace, before_ns, before_ns)).rowcount
             connection.execute('DROP TABLE observed_epubs')
             return deleted

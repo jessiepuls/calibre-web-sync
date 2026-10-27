@@ -63,6 +63,23 @@ class LibraryTests(unittest.TestCase):
         self.path.write_bytes(b'changed size')
         self.assertEqual(library.catalog(self.root)[0]['size'], len(b'changed size'))
 
+    def test_scan_cutoff_is_captured_before_snapshot_even_for_empty_catalogs(self):
+        snapshot = library.snapshot
+
+        def later_snapshot(root, destination):
+            clock.return_value = 200
+            snapshot(root, destination)
+
+        for populated in (True, False):
+            if not populated:
+                self.edit_database('DELETE FROM data')
+            with self.subTest(populated=populated), \
+                    patch.object(library.time, 'time_ns', return_value=100) as clock, \
+                    patch.object(library, 'snapshot', side_effect=later_snapshot):
+                result = library.catalog(self.root)
+            self.assertEqual(result.scan_started_ns, 100)
+            self.assertEqual(len(result), int(populated))
+
     def test_copied_uuid_at_another_root_is_a_different_namespace(self):
         copied = self.root.parent / 'copy'
         shutil.copytree(self.root, copied)

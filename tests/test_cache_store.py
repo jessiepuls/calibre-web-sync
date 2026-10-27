@@ -86,7 +86,7 @@ class StoreTests(unittest.TestCase):
         reader.save(self.key, self.entry)
         observed = reader.lookup(self.key)
         library = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
-        writer.prune_epubs(library, set())
+        writer.prune_epubs(library, set(), before_ns=300)
         reader.touch(self.key, observed, 600)
         self.assertIsNone(writer.lookup(self.key))
 
@@ -221,7 +221,7 @@ class StoreTests(unittest.TestCase):
         for key in (self.key, keep, other_root, other_uuid, other_format):
             store.save(key, self.entry)
         identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
-        self.assertEqual(store.prune_epubs(identity, {keep}), 1)
+        self.assertEqual(store.prune_epubs(identity, {keep}, before_ns=300), 1)
         self.assertIsNone(store.lookup(self.key))
         for key in (keep, other_root, other_uuid, other_format):
             self.assertEqual(store.lookup(key), self.entry)
@@ -236,9 +236,45 @@ class StoreTests(unittest.TestCase):
         observed = {replace(self.key, relative_path=f'book-{number}.epub') for number in range(2000)}
         observed.add(self.key)
         identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
-        self.assertEqual(store.prune_epubs(identity, observed), 1)
+        self.assertEqual(store.prune_epubs(identity, observed, before_ns=300), 1)
         self.assertEqual(store.lookup(self.key), self.entry)
         self.assertIsNone(store.lookup(obsolete))
+
+    def test_old_scan_preserves_entries_newly_hashed_by_another_store(self):
+        reader, writer = self.store(), self.store()
+        identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
+        for hashed_at, last_seen in ((300, 300), (400, 400), (400, 200)):
+            with self.subTest(hashed_at=hashed_at, last_seen=last_seen):
+                newer = replace(self.entry, hashed_at_ns=hashed_at, last_seen_ns=last_seen)
+                writer.save(self.key, newer)
+                self.assertEqual(reader.prune_epubs(identity, set(), before_ns=300), 0)
+                self.assertEqual(writer.lookup(self.key), newer)
+                self.assertEqual(reader.prune_epubs(identity, set(), before_ns=500), 1)
+                self.assertIsNone(writer.lookup(self.key))
+
+    def test_old_scan_preserves_entries_observed_by_another_store(self):
+        reader, writer = self.store(), self.store()
+        identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
+        for last_seen in (300, 400):
+            with self.subTest(last_seen=last_seen):
+                writer.save(self.key, self.entry)
+                writer.touch(self.key, self.entry, last_seen)
+                self.assertEqual(reader.prune_epubs(identity, set(), before_ns=300), 0)
+                self.assertEqual(writer.lookup(self.key), replace(self.entry, last_seen_ns=last_seen))
+                self.assertEqual(reader.prune_epubs(identity, set(), before_ns=500), 1)
+
+    def test_pruning_removes_only_older_absent_entries(self):
+        store = self.store()
+        identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
+        observed = replace(self.key, relative_path='observed.epub')
+        recent = replace(self.key, relative_path='recent.epub')
+        store.save(self.key, self.entry)
+        store.save(observed, self.entry)
+        store.save(recent, replace(self.entry, last_seen_ns=400))
+        self.assertEqual(store.prune_epubs(identity, {observed}, before_ns=300), 1)
+        self.assertIsNone(store.lookup(self.key))
+        self.assertEqual(store.lookup(observed), self.entry)
+        self.assertIsNotNone(store.lookup(recent))
 
     def test_failed_pruning_rolls_back_and_can_be_retried(self):
         store = self.store()
@@ -249,12 +285,12 @@ class StoreTests(unittest.TestCase):
         self.query("""CREATE TRIGGER fail_delete BEFORE DELETE ON digests
                    BEGIN SELECT RAISE(ABORT, 'simulated failure'); END""")
         with self.assertRaises(CacheStorageError):
-            store.prune_epubs(identity, set())
+            store.prune_epubs(identity, set(), before_ns=300)
         self.assertEqual(store.lookup(self.key), self.entry)
         self.assertEqual(store.lookup(other), self.entry)
         self.query('DROP TRIGGER fail_delete')
-        self.assertEqual(store.prune_epubs(identity, set()), 2)
-        self.assertEqual(store.prune_epubs(identity, set()), 0)
+        self.assertEqual(store.prune_epubs(identity, set(), before_ns=300), 2)
+        self.assertEqual(store.prune_epubs(identity, set(), before_ns=300), 0)
 
     def test_pruning_rejects_mixed_namespaces_or_formats_before_opening_storage(self):
         identity = LibraryIdentity(self.key.library_uuid, Path(self.key.library_root))
@@ -263,12 +299,12 @@ class StoreTests(unittest.TestCase):
         for key in keys:
             with self.subTest(key=key):
                 with self.assertRaises(ValueError):
-                    self.store().prune_epubs(identity, {key})
+                    self.store().prune_epubs(identity, {key}, before_ns=300)
         self.assertFalse(self.path.exists())
 
     def test_missing_identity_cannot_prune_or_open_storage(self):
         identity = LibraryIdentity(None, Path(self.key.library_root))
-        self.assertEqual(self.store().prune_epubs(identity, set()), 0)
+        self.assertEqual(self.store().prune_epubs(identity, set(), before_ns=300), 0)
         self.assertFalse(self.path.exists())
 
 

@@ -58,6 +58,14 @@ digest still matching the observed entry. A delayed hit cannot overwrite a
 replacement digest or recreate a pruned entry, and observation times never move
 backward when hits interleave across comparisons.
 
+Each complete catalog records a wall-clock nanosecond cutoff before snapshot
+creation. Pruning removes absent EPUB entries only when their hash and last-seen
+timestamps are both strictly older than that cutoff. New hashes and persistent
+hits at or after the cutoff survive an older scan, including empty catalogs;
+a later complete scan can remove them if they remain absent. These ordering
+checks use the host clock; clock adjustments can affect cache retention and
+rehashing costs. Book existence is still determined from fresh catalogs.
+
 The CLI reports comparison statistics immediately after planning. Elapsed time
 includes catalog snapshots, file checks, hashing, cache access, and pruning.
 Hash counters describe completed fresh content reads by the comparison provider;

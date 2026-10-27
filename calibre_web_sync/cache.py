@@ -172,7 +172,7 @@ class DigestProvider:
             return 0
         keys = {CacheKey.from_book(book) for book in catalog}
         with self._storage_errors():
-            return self.store.prune_epubs(catalog.library, keys)
+            return self.store.prune_epubs(catalog.library, keys, before_ns=catalog.scan_started_ns)
         return 0
 
     @staticmethod

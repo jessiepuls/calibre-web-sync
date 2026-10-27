@@ -40,10 +40,11 @@ class FileDigest:
 
 @dataclass(frozen=True)
 class LibraryCatalog:
-    """A completed EPUB scan, retaining identity even when no books remain."""
+    """A complete EPUB scan with identity and the wall-clock time it began."""
 
     library: LibraryIdentity
     books: tuple
+    scan_started_ns: int
 
     def __iter__(self):
         return iter(self.books)
@@ -144,6 +145,7 @@ def snapshot(root, destination):
 
 def catalog(root):
     """Return a complete EPUB snapshot, or raise without returning a partial scan."""
+    scan_started_ns = time.time_ns()
     root = Path(root).resolve()
     with tempfile.TemporaryDirectory(prefix='calibre-sync-db-') as temporary:
         copied = Path(temporary) / 'metadata.db'
@@ -160,7 +162,7 @@ def catalog(root):
                     books.append(_epub_book(identity, (bid, title, folder, name), authors[bid]))
                 except FileNotFoundError as error:
                     raise RuntimeError(f'Book {bid}: missing EPUB: {error.filename}') from None
-            return LibraryCatalog(identity, tuple(books))
+            return LibraryCatalog(identity, tuple(books), scan_started_ns)
         finally:
             c.close()
 

@@ -153,6 +153,47 @@ class PlannerCacheTests(unittest.TestCase):
             self.assertEqual(self.plan(self.provider())[0]['status'], 'missing')
         self.assertEqual({row[0] for row in self.cache_rows()}, {LOCAL_UUID})
 
+    def test_stale_catalog_cannot_prune_hashes_learned_by_a_newer_comparison(self):
+        self.local.add(1, 'Same', b'aaaa')
+        with patch.object(library.time, 'time_ns', return_value=100):
+            old_local, old_remote = self.local.catalog(), self.remote.catalog()
+        self.remote.add(10, 'Same', b'aaaa')
+        with patch.object(library.time, 'time_ns', return_value=200):
+            self.plan(self.provider())
+        with patch.object(library.time, 'time_ns', return_value=300):
+            # The provider is created after the newer comparison, but owns old catalogs.
+            old_plan = planner.make_plan(old_local, old_remote, digest_provider=self.provider())
+        self.assertEqual(old_plan[0]['status'], 'missing')
+        self.assertEqual(len(self.cache_rows()), 2)
+        with patch.object(library.time, 'time_ns', return_value=400):
+            with patch.object(cache, 'stable_digest', side_effect=AssertionError('Newer hashes were pruned')):
+                self.assertEqual(self.plan(self.provider())[0]['status'], 'present')
+        self.remote.remove(10)
+        with patch.object(library.time, 'time_ns', return_value=500):
+            self.assertEqual(self.plan(self.provider())[0]['status'], 'missing')
+        self.assertEqual({row[0] for row in self.cache_rows()}, {LOCAL_UUID})
+
+    def test_stale_catalog_cannot_prune_an_existing_hash_observed_again(self):
+        self.local.add(1, 'Same', b'aaaa')
+        self.remote.add(10, 'Same', b'aaaa')
+        with patch.object(library.time, 'time_ns', return_value=100):
+            self.plan(self.provider())
+        # Temporarily absent from the old snapshot, while the EPUB still exists.
+        self.remote.execute('DELETE FROM data WHERE book=10')
+        with patch.object(library.time, 'time_ns', return_value=200):
+            old_local, old_remote = self.local.catalog(), self.remote.catalog()
+        self.remote.execute("INSERT INTO data VALUES(10,'EPUB','book')")
+        with patch.object(library.time, 'time_ns', return_value=300):
+            newer = self.provider()
+            self.assertEqual(self.plan(newer)[0]['status'], 'present')
+            self.assertEqual(newer.stats.files_hashed, 0)
+        with patch.object(library.time, 'time_ns', return_value=400):
+            planner.make_plan(old_local, old_remote, digest_provider=self.provider())
+        self.assertEqual(len(self.cache_rows()), 2)
+        with patch.object(library.time, 'time_ns', return_value=500):
+            with patch.object(cache, 'stable_digest', side_effect=AssertionError('Recent hit was pruned')):
+                self.assertEqual(self.plan(self.provider())[0]['status'], 'present')
+
     def test_empty_local_catalog_prunes_its_namespace_only(self):
         self.local.add(1, 'Same', b'aaaa')
         self.remote.add(10, 'Same', b'aaaa')
