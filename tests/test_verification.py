@@ -133,8 +133,10 @@ class UploadSequenceTests(unittest.TestCase):
         self.config.write_text(json.dumps({'local': str(self.local.root), 'remote': str(self.remote.root), 'cache_dir': str(self.root / 'cache')}))
 
     def run_cli(self):
-        with patch('sys.argv', ['sync.py', '--config', str(self.config), '--apply']), patch.object(cli, 'HERE', self.root), contextlib.redirect_stdout(io.StringIO()):
+        output = io.StringIO()
+        with patch('sys.argv', ['sync.py', '--config', str(self.config), '--apply']), patch.object(cli, 'HERE', self.root), contextlib.redirect_stdout(output):
             cli.main()
+        return output.getvalue()
 
     def test_each_upload_is_verified_before_next_and_summary_does_not_rescan(self):
         events = []
@@ -150,9 +152,11 @@ class UploadSequenceTests(unittest.TestCase):
             return engine.verify_upload(*args, **kwargs)
 
         with patch.object(cli, 'authenticated_client', return_value=Mock(upload=upload)), patch.object(cli, 'verify_upload', side_effect=verify), patch.object(cli, 'catalog', wraps=library.catalog) as catalogs:
-            self.run_cli()
+            output = self.run_cli()
         self.assertEqual(events, ['upload', 'verify', 'upload', 'verify'])
         self.assertEqual(catalogs.call_count, 2)  # Initial planning only.
+        self.assertEqual(output.count('Comparison:'), 1)
+        self.assertIn('hashed: 2 files, 11 bytes', output)  # Excludes staging/verification.
         with cache.DigestProvider(SQLiteDigestStore(self.root / 'cache' / 'hashes.sqlite3')) as provider:
             with patch.object(cache, 'stable_digest', side_effect=AssertionError('Server hashes were seeded')):
                 for book in self.remote.catalog():
@@ -176,3 +180,22 @@ class UploadSequenceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'changed since planning'):
                 self.run_cli()
         client.upload.assert_not_called()
+
+    def test_retry_after_interrupted_upload_reuses_hashes_and_skips_verified_book(self):
+        uploads = []
+
+        def upload(path):
+            uploads.append(path.read_bytes())
+            if len(uploads) == 2:
+                raise RuntimeError('Interrupted upload')
+            self.remote.add(10 if len(uploads) == 1 else 20, 'Uploaded', uploads[-1])
+            return 10 if len(uploads) == 1 else 20
+
+        with patch.object(cli, 'authenticated_client', return_value=Mock(upload=upload)):
+            with self.assertRaisesRegex(RuntimeError, 'Interrupted upload'):
+                self.run_cli()
+            with patch.object(cache, 'stable_digest', side_effect=AssertionError('Completed hashes must survive')):
+                output = self.run_cli()
+        self.assertEqual(uploads, [b'first', b'second', b'second'])
+        self.assertIn('missing: 1 | present: 1', output)
+        self.assertIn('hashed: 0 files, 0 bytes', output)

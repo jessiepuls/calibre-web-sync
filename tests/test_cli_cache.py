@@ -62,12 +62,15 @@ class CacheOptionsTests(unittest.TestCase):
 
     def run_cli(self, *options):
         argv = ['sync.py', '--config', str(self.config), *options]
-        with patch('sys.argv', argv), patch.object(cli, 'HERE', self.root), contextlib.redirect_stdout(io.StringIO()):
+        output = io.StringIO()
+        with patch('sys.argv', argv), patch.object(cli, 'HERE', self.root), contextlib.redirect_stdout(output):
             cli.main()
+        return output.getvalue()
 
     def libraries(self):
         local = FixtureLibrary(self.root / 'local', LOCAL_UUID)
         remote = FixtureLibrary(self.root / 'remote', REMOTE_UUID)
+        self.local, self.remote = local, remote
         local.add(1, 'Book', b'epub')
         remote.add(2, 'Book', b'epub')
         self.config.write_text(json.dumps({'local': str(local.root), 'remote': str(remote.root), 'cache_dir': str(self.root / 'cache')}))
@@ -105,3 +108,64 @@ class CacheOptionsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Scan failed'):
                 self.run_cli()
         close.assert_called_once()
+
+    def test_summary_reports_cold_warm_disabled_and_rehash_work(self):
+        self.libraries()
+        cold = self.run_cli()
+        self.assertIn('cache: enabled | persistent hits: 0 | misses: 2', cold)
+        self.assertIn('hashed: 2 files, 8 bytes', cold)
+        warm = self.run_cli()
+        self.assertIn('persistent hits: 2 | misses: 0', warm)
+        self.assertIn('hashed: 0 files, 0 bytes', warm)
+        disabled = self.run_cli('--no-cache')
+        self.assertIn('cache: disabled | persistent hits: 0 | misses: 0', disabled)
+        self.assertIn('hashed: 2 files, 8 bytes', disabled)
+        refreshed = self.run_cli('--rehash')
+        self.assertIn('persistent hits: 0 | misses: 2', refreshed)
+        self.assertIn('hashed: 2 files, 8 bytes', refreshed)
+
+    def test_summary_includes_snapshots_in_elapsed_time(self):
+        self.libraries()
+        events = []
+        real_catalog = cli.catalog
+
+        def tick():
+            events.append('clock')
+            return 10.0 if len(events) == 1 else 13.25
+
+        def catalog(root):
+            events.append('catalog')
+            return real_catalog(root)
+
+        with patch.object(cli.time, 'perf_counter', side_effect=tick), patch.object(cli, 'catalog', side_effect=catalog):
+            output = self.run_cli()
+        self.assertEqual(events, ['clock', 'catalog', 'catalog', 'clock'])
+        self.assertIn('Comparison: 3.25s', output)
+
+    def test_summary_reports_in_run_reuse(self):
+        self.libraries()
+        # Both local books compare against the same server candidate.
+        self.local.add(3, 'Duplicate', b'epub')
+        output = self.run_cli()
+        self.assertIn('in-run reuse: 1 | hashed: 3 files, 12 bytes', output)
+
+    def test_cache_failure_summary_and_disabled_retry_preserve_corrupt_file(self):
+        database = self.libraries()
+        database.parent.mkdir()
+        database.write_bytes(b'unknown data')
+        with self.assertLogs(cache.LOGGER, level='WARNING') as warnings:
+            output = self.run_cli()
+        self.assertEqual(len(warnings.output), 1)
+        self.assertIn('cache: unavailable', output)
+        self.assertIn('hashed: 2 files, 8 bytes', output)
+        self.assertIn('cache: disabled', self.run_cli('--no-cache'))
+        self.assertEqual(database.read_bytes(), b'unknown data')
+
+    def test_server_deletion_is_visible_in_warm_summary(self):
+        self.libraries()
+        self.run_cli()
+        self.remote.remove(2)
+        output = self.run_cli()
+        self.assertIn('missing: 1 | present: 0', output)
+        self.assertIn('persistent hits: 1 | misses: 0', output)
+        self.assertIn('hashed: 0 files, 0 bytes', output)

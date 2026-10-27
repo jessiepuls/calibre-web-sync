@@ -92,6 +92,11 @@ produce a warning and comparison continues with fresh hashes. Cache data is
 disposable: remove the database while no sync is running to rebuild it next time.
 Missing library UUIDs disable persistent caching for that library.
 
+Each comparison reports elapsed time, persistent cache hits/misses, in-run hash
+reuse, and files/bytes freshly hashed. These numbers exclude upload staging and
+verification. Catalog snapshots and file attribute checks still run on warm
+comparisons. See [benchmarking](docs/benchmarking.md) for reproducible measurements.
+
 ## Authentication
 
 For 1Password, install `op`, unlock the desktop app, and enable

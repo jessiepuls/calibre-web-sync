@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import urllib.error
 
 from .client import Client
@@ -119,8 +120,10 @@ def main():
 
 def sync_libraries(parser, args, local, remote, provider):
     """Compare and upload while the caller owns the lock and digest provider."""
+    started = time.perf_counter()
     plan = make_plan(catalog(local), catalog(remote), digest_provider=provider,
                      progress=lambda done, total: print(f'Comparing {done}/{total}...', flush=True))
+    report_comparison(provider, time.perf_counter() - started, cache_requested=args.cache)
     counts = collections.Counter(b['status'] for b in plan)
     print(' | '.join(f'{key}: {counts[key]}' for key in ('missing', 'present', 'review', 'duplicate-local')))
     allowed = set(args.include_review)
@@ -153,6 +156,18 @@ def sync_libraries(parser, args, local, remote, provider):
             verify_upload(remote, server_id, book['sha256'], digest_provider=provider)
             print(f'  Verified server book {server_id}', flush=True)
     print(f'Finished: uploaded and verified {len(selected)} EPUBs. Existing server entries were left unchanged.')
+
+
+def report_comparison(provider, elapsed, *, cache_requested):
+    """Report comparison work before any staging, transfers, or verification."""
+    mode = 'enabled' if provider.persistence_enabled else 'unavailable'
+    if not cache_requested:
+        mode = 'disabled'
+    stats = provider.stats
+    print(f'Comparison: {elapsed:.2f}s | cache: {mode} | '
+          f'persistent hits: {stats.persistent_hits} | misses: {stats.persistent_misses} | '
+          f'in-run reuse: {stats.ephemeral_hits} | '
+          f'hashed: {stats.files_hashed} files, {stats.bytes_hashed} bytes')
 
 
 def run():

@@ -41,6 +41,12 @@ entries. Upload verification reads fresh bytes independently of cache hits and
 seeds the provider only after the digest matches and the file fingerprint is
 still unchanged. Disabled caching also disables persistence of verified hashes.
 
+The CLI reports comparison statistics immediately after planning. Elapsed time
+includes catalog snapshots, file checks, hashing, cache access, and pruning.
+Hash counters describe completed fresh content reads by the comparison provider;
+they exclude upload staging and verification. `tools/benchmark_cache.py` measures
+these phases against disposable synthetic libraries; see [benchmarking](benchmarking.md).
+
 ## Uploads and verification
 
 The CLI selects missing books and explicitly included review entries. For each
